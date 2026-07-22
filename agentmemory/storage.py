@@ -501,6 +501,108 @@ def _iter_project_records(repo_root: Path, shared_records: Path) -> List[Dict[st
     return records
 
 
+def _iter_resume_checkpoints(
+    repo_root: Path,
+    checkpoint_dir: Path,
+    identity: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    if not checkpoint_dir.exists():
+        return []
+
+    records: List[Dict[str, Any]] = []
+    for path in checkpoint_dir.iterdir():
+        _validate_within_root(repo_root, path, target_is_file=True)
+        info = _lstat(path)
+        if info is None:
+            continue
+
+        mode = stat.S_IFMT(info.st_mode)
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise StorageError("checkpoint entry must be a regular file")
+        if path.suffix != ".json":
+            raise StorageError("checkpoint entries must use .json extension")
+
+        try:
+            validated = _read_checkpoint_record(path)
+        except (RecordValidationError, StorageError) as exc:
+            raise StorageError("malformed checkpoint payload") from exc
+
+        if validated["id"] != path.stem:
+            raise StorageError("checkpoint filename mismatch")
+        if validated["record_type"] != "checkpoint":
+            raise StorageError("checkpoint type mismatch")
+
+        applies_to = validated["applies_to"]
+        if (
+            applies_to["repository_id"] != identity["repository_id"]
+            or applies_to["worktree_id"] != identity["worktree_id"]
+        ):
+            raise StorageError("checkpoint repository/worktree mismatch")
+
+        _parse_created_at(validated["created_at"])
+        records.append(validated)
+
+    return records
+
+
+def load_resume_state(repo_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    manifest = layout["manifest"]
+    checkpoint_dir = layout["checkpoint_dir"]
+    shared_records = layout["shared_records"]
+    gitignore = repo_root / ".gitignore"
+
+    _validate_within_root(repo_root, manifest, target_is_file=True)
+    _validate_within_root(repo_root, gitignore, target_is_file=True)
+    _validate_within_root(repo_root, checkpoint_dir, target_is_file=False)
+    _validate_within_root(repo_root, shared_records, target_is_file=False)
+
+    if not manifest.exists():
+        raise StorageError("repository is not initialized")
+    if not _compatible_manifest(manifest):
+        raise StorageError("repository is not initialized")
+    if not _gitignore_has_exact_ignore_line(repo_root):
+        raise StorageError("repository is not initialized")
+
+    all_checkpoints = _iter_resume_checkpoints(repo_root, checkpoint_dir, identity)
+    branch_checkpoints = [
+        item
+        for item in all_checkpoints
+        if item["applies_to"]["branch"] == identity["branch"]
+    ]
+    if not branch_checkpoints:
+        return {
+            "branch": identity["branch"],
+            "head": identity["head"],
+            "checkpoint": None,
+            "stale_head": False,
+            "project_records": [],
+        }
+
+    latest_checkpoint = max(
+        branch_checkpoints,
+        key=lambda item: (_parse_created_at(item["created_at"]), item["id"]),
+    )
+    stale_head = latest_checkpoint["applies_to"]["head"] != identity["head"]
+    checkpoint = None if stale_head else latest_checkpoint
+
+    project_records = (
+        _load_shared_records_for_render(identity, shared_records, repo_root)
+        if (checkpoint is not None or stale_head)
+        else []
+    )
+
+    return {
+        "branch": identity["branch"],
+        "head": identity["head"],
+        "checkpoint": checkpoint,
+        "stale_head": stale_head,
+        "project_records": project_records,
+    }
+
+
 def _filter_project_records(
     records: List[Dict[str, Any]],
     identity: Dict[str, str],
@@ -975,6 +1077,7 @@ __all__ = [
     "StorageError",
     "StorageConflictError",
     "StoragePathError",
+    "load_resume_state",
     "initialize_repository",
     "create_checkpoint",
     "create_candidate",

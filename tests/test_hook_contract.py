@@ -1,6 +1,7 @@
 import json
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,11 +14,7 @@ FIXTURES_DIR = ROOT / "tests" / "fixtures"
 HOOKS_JSON = ROOT / "hooks" / "hooks.json"
 DISPATCHER = ROOT / "hooks" / "agentmemory_hook.py"
 
-EXPECTED_SESSION_START_OUTPUT = (
-    '{"continue":true,"hookSpecificOutput":{"hookEventName":"SessionStart",'
-    '"additionalContext":"AgentMemory M0 hook active. This probe does not restore '
-    'or persist memory."}}'
-)
+EXPECTED_FALLBACK_OUTPUT = '{"continue":true}'
 EXPECTED_PRECOMPACT_OUTPUT = '{"continue":true}'
 ERROR_OUTPUT = "agentmemory hook input rejected."
 SENSITIVE_FIELDS = {
@@ -112,21 +109,15 @@ class TestAgentMemoryHookContract(unittest.TestCase):
         payload = payload_with_sensitives(FIXTURES_DIR / "session-startup.json")
         result = run_dispatcher("session-start", payload)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, EXPECTED_SESSION_START_OUTPUT)
+        self.assertEqual(result.stdout, EXPECTED_FALLBACK_OUTPUT)
         self.assertEqual(result.stderr, "")
         self.assert_no_sensitive_leak(result.stdout, result.stderr)
-        parsed = json.loads(result.stdout)
-        self.assertTrue(parsed["continue"])
-        self.assertEqual(
-            parsed["hookSpecificOutput"]["hookEventName"],
-            "SessionStart",
-        )
 
     def test_session_compact_fixture_returns_expected_output(self) -> None:
         payload = payload_with_sensitives(FIXTURES_DIR / "session-compact.json")
         result = run_dispatcher("session-start", payload)
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, EXPECTED_SESSION_START_OUTPUT)
+        self.assertEqual(result.stdout, EXPECTED_FALLBACK_OUTPUT)
         self.assertEqual(result.stderr, "")
         self.assert_no_sensitive_leak(result.stdout, result.stderr)
 
@@ -189,9 +180,6 @@ class TestAgentMemoryHookContract(unittest.TestCase):
         result = run_dispatcher("session-start", payload)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
-        parsed = json.loads(result.stdout)
-        self.assertIn("hookSpecificOutput", parsed)
-        self.assertIn("hookEventName", parsed["hookSpecificOutput"])
         self.assertNotIn("unknown_field", result.stdout)
         self.assertNotIn("notes", result.stdout)
         self.assert_no_sensitive_leak(result.stdout, result.stderr)
@@ -218,7 +206,7 @@ class TestAgentMemoryHookContract(unittest.TestCase):
                 cwd=tmpdir,
             )
             self.assertEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, EXPECTED_SESSION_START_OUTPUT)
+            self.assertEqual(result.stdout, EXPECTED_FALLBACK_OUTPUT)
 
             after = snapshot_file_states(Path(tmpdir))
             self.assertEqual(before, after)
@@ -267,6 +255,42 @@ class TestAgentMemoryHookContract(unittest.TestCase):
                 lambda d: (d / "marker.txt").write_text("after", encoding="utf-8"),
                 "in-place file modification must change snapshot",
             )
+
+    def test_cold_start_does_not_create_plugin_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_root = Path(tmpdir)
+            plugin_root = temp_root / "plugin"
+            (plugin_root / "hooks").mkdir(parents=True)
+            shutil.copytree(
+                ROOT / "agentmemory",
+                plugin_root / "agentmemory",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+            shutil.copy2(DISPATCHER, plugin_root / "hooks" / DISPATCHER.name)
+
+            payload = json.dumps(
+                {
+                    "hook_event_name": "SessionStart",
+                    "cwd": str(temp_root),
+                }
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(plugin_root / "hooks" / DISPATCHER.name),
+                    "session-start",
+                ],
+                input=payload,
+                text=True,
+                capture_output=True,
+                cwd=str(temp_root),
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, EXPECTED_FALLBACK_OUTPUT)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(list(plugin_root.rglob("__pycache__")), [])
+            self.assertEqual(list(plugin_root.rglob("*.pyc")), [])
 
 
 if __name__ == "__main__":
