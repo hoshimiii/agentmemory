@@ -19,4 +19,16 @@
   - Current PreCompact payload has no stable explicit checkpoint content, so it remains a deterministic no-op rather than reading transcripts or fabricating state.
   - M0-M3 behavior and strict action/event rejection remain intact.
 - M4 acceptance evidence: root review and independent Terra acceptance passed; capsule security, exact fallback, read-only cold start, branch/head filtering, deterministic budget handling, and M0-M3 regression coverage were verified.
-- Next action: run the final verification matrix, archive M4 on its branch, then begin M5 packaging, public skill, documentation, and end-to-end acceptance.
+- M4 final evidence: both Python runners passed 75 tests with two Windows FIFO capability skips; compile, Python 3.9 AST, JSON parsing, plugin validation, diff checks, and independent Terra acceptance passed.
+- M4 is archived as `8c74d6e`; current focus is `codex/m5-plugin-package-e2e`.
+- M5 goal: finish the distributable 0.1.0 plugin package with one public AgentMemory skill, accurate product/security/privacy documentation, and cohesive local CLI/hook/worktree end-to-end coverage.
+- M5 non-goals: runtime/schema/storage behavior changes, new hook events, transcript or `PLUGIN_DATA` use, MCP/daemon/app/UI, workspace/global memory, automatic repository scanning, automatic candidate review/promotion, marketplace writes, installation, hook trust, remote push, or deployment.
+- M5 constraints and acceptance:
+  - Keep exactly one public skill. It may guide explicit `init`, `status`, `checkpoint`, `candidate`, `review --confirm`, and `render` operations through a bundled thin CLI launcher; it never edits `.continuity` files directly or treats memory as authority.
+  - Package discovery must use valid plugin fields and existing default Hook discovery; no unsupported manifest keys or new lifecycle surface.
+  - Documentation must state tracked versus ignored data, secret-scan limits, untrusted-memory precedence, branch/worktree behavior, rollback/data-retention behavior, and the separate installed-host trust gate.
+  - E2E must use temporary Git repositories and linked worktrees to prove explicit checkpoint/resume, candidate exclusion, confirmed project records, branch/head filtering, secret rejection, deterministic PreCompact no-op, rebuild behavior, and no Hook/plugin bytecode side effects.
+  - M0-M4 tests and behavior remain unchanged; no host installation or trust mutation is part of M5.
+- M5 acceptance evidence: exact `gpt-5.3-codex-spark xhigh` implemented the bounded packaging and cohesive E2E slices with no `service_tier`; root reviewed and corrected the integrated result; fresh independent Terra acceptance passed after the E2E exercised the commands discovered from `hooks/hooks.json` and snapshot-checked the complete local continuity tree for side effects.
+- M5 final evidence: both Python runners passed 77 tests with two Windows FIFO capability skips; the scoped package E2E passed 2 tests under each runner; compile, Python 3.9 AST, JSON parsing, skill validation, plugin validation, and diff checks passed.
+- M5 is accepted on `codex/m5-plugin-package-e2e`; installation, hook trust, remote push, and deployment remain separate unapproved gates.

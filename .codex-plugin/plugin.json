@@ -1,20 +1,27 @@
 {
   "name": "agentmemory",
   "version": "0.1.0",
-  "description": "Agentmemory M0 hook-only probe plugin.",
+  "description": "Local-first project continuity with explicit checkpoints and reviewed memory.",
   "author": {
     "name": "hoshimiii"
   },
   "repository": "https://github.com/hoshimiii/agentmemory",
+  "skills": "./skills/",
   "interface": {
     "displayName": "AgentMemory",
-    "shortDescription": "SessionStart and PreCompact hook probe for M0.",
-    "longDescription": "AgentMemory M0 ships a minimal plugin scaffold and no persistent memory behavior.",
+    "shortDescription": "Project checkpoints, reviewed memory, and bounded session resume.",
+    "longDescription": "AgentMemory stores project-scoped checkpoints and review-gated memory, then injects a bounded read-only resume capsule at SessionStart.",
     "developerName": "hoshimiii",
     "category": "Productivity",
     "capabilities": [
-      "HookDispatcher"
+      "HookDispatcher",
+      "LocalCLI",
+      "ProjectMemory"
     ],
-    "defaultPrompt": "AgentMemory M0 is a probe plugin for hook contract behavior."
+    "defaultPrompt": [
+      "Use $agentmemory to inspect this project's continuity status.",
+      "Use $agentmemory to create an explicit project checkpoint.",
+      "Use $agentmemory to review a candidate only after I confirm."
+    ]
   }
 }

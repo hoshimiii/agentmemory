@@ -1,0 +1,4 @@
+interface:
+  display_name: "AgentMemory"
+  short_description: "Local continuity with explicit review-gated resume and candidates."
+  default_prompt: "Use $agentmemory to checkpoint, resume from exact/stale continuity, and review candidate proposals."
