@@ -2,14 +2,15 @@
 
 ## State
 - M0 hook-only baseline is at commit `8875076`.
-- `codex/m1-core-contract` passed independent Terra acceptance.
+- M1 core-contract passed independent Terra acceptance and is committed as `9f9290d`.
+- Current focus: `codex/m2-local-store-cli` (M2 accepted by independent Terra review).
+- M2 scope in this branch is limited to local checkpoint persistence and CLI scaffolding:
+  - stdlib-only local checkpoint storage (`agentmemory/storage.py`, `agentmemory/locking.py`).
+  - minimal CLI (`agentmemory/cli.py`, `agentmemory/__main__.py`).
+  - scaffold persistence and status behavior in `tests/test_storage_cli.py`.
+  - no hook changes, no skill/manifest updates, no MCP/daemon, no candidate/project persistence, no resume capsule logic.
+  - no PLUGIN_DATA or transcript parsing in storage paths.
 - The dual-layer storage/validation direction remains: strict runtime canonical checks remain authoritative while JSON Schema mirrors enforceable constraints.
-- M1 work covers:
-  - canonical JSON, UTF-8 byte checks, and integrity hash enforcement in runtime.
-  - strict `schema_version` and `integrity.version` integer typing (bool rejected).
-  - bounded, deterministic `applies_to.head` and `applies_to.branch` validation.
-  - shared runtime bounds for `branch`, `paths`, `provenance` fields, and timestamps.
-  - schema extension marker for required runtime-only validation items and schema/runtime drift checks.
-- OpenViking is unavailable in this environment, so no OpenViking-specific integrations are in scope.
-- Remaining deferrals: no additional contract changes beyond v1 runtime/schema enforcement or platform-host trust checks.
-- Next action is to archive M1 in Git, branch M2, and implement the local store/init/CLI foundation.
+- M1 contract continues to hold: canonical JSON, UTF-8 checks, integrity enforcement, and schema-version/type bounds.
+- M2 acceptance evidence: 53 tests passed with one Windows FIFO capability skip; compile, Python 3.9 AST grammar, plugin validation, symlink/conflict, and CLI leakage checks passed.
+- Next action: archive M2 in Git, create `codex/m3-reviewed-memory-render`, and implement candidate review plus deterministic project-memory rendering.
