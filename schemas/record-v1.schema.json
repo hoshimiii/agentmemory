@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentmemory.example/record-v1.schema.json",
+  "title": "AgentMemory Record v1",
+  "x-agentmemory-runtime-validation-required": [
+    "canonical-json-shape",
+    "canonical-json-utf8",
+    "content-utf8-byte-limit",
+    "timestamp-semantic-parse",
+    "integrity_content_hash_verification",
+    "secret_scan"
+  ],
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "record_type",
+    "kind",
+    "status",
+    "semantic_role",
+    "summary",
+    "scope",
+    "applies_to",
+    "provenance",
+    "content",
+    "review",
+    "created_at",
+    "integrity"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "record_type": {
+      "type": "string",
+      "enum": ["checkpoint", "candidate", "project_record"]
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["checkpoint", "decision", "incident", "constraint"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["candidate", "active"]
+    },
+    "semantic_role": {
+      "type": "string",
+      "enum": ["fact", "inference", "instruction"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!\\s*$)[\\s\\S]+$"
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["local", "project"]
+    },
+      "applies_to": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository_id", "worktree_id", "branch", "head", "paths"],
+      "properties": {
+        "repository_id": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "worktree_id": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "branch": {
+          "oneOf": [
+            { "const": "DETACHED" },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^(?!DETACHED$)(?![./-])(?!.*/\\.)(?!.*[./]$)(?!.*//)(?!\\.{1,2}(?:/|$))(?!.*/\\.{1,2}(?:/|$))(?![^/]*\\.lock(?:/|$))(?!.*/[^/]*\\.lock(?:/|$))(?!.*\\.\\.)(?!.*@\\{)(?!.*[\\x00-\\x20\\x7f~^:?*\\[\\\\]).+$"
+            }
+          ]
+        },
+        "head": {
+          "oneOf": [
+            { "const": "UNBORN" },
+            {
+              "type": "string",
+              "minLength": 40,
+              "maxLength": 40,
+              "pattern": "^[a-f0-9]{40}$"
+            }
+          ]
+        },
+        "paths": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "maxLength": 2048,
+            "pattern": "^(?!\\s)(?![^/]*:)(?!/)(?!.*\\\\)(?!.*//)(?!.*\\x00)(?!\\.{1,2}(?:/|$))(?!.*/\\.{1,2}(?:/|$))(?!.*[/]$)(?!.*\\s$).+$"
+          },
+          "default": []
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "evidence_refs", "source_record_id"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^(?!\\s*$)[\\s\\S]+$"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^(?!\\s*$)[\\s\\S]+$"
+          }
+        },
+        "source_record_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(?!\\s*$)[\\s\\S]+$"
+        }
+      }
+    },
+    "content": {
+      "type": "object",
+      "description": "Arbitrary JSON object payload up to bounded byte size."
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confirmed", "confirmed_by", "confirmed_at"],
+      "properties": {
+        "confirmed": {
+          "type": "boolean"
+        },
+        "confirmed_by": {
+          "type": ["string", "null"]
+        },
+        "confirmed_at": {
+          "type": ["string", "null"],
+          "maxLength": 64,
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:[+-]\\d{2}:\\d{2}|Z)$"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "maxLength": 64,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:[+-]\\d{2}:\\d{2}|Z)$"
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "content_hash"],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "record_type": { "const": "checkpoint" } }, "required": ["record_type"] },
+      "then": {
+        "properties": {
+          "kind": { "const": "checkpoint" },
+          "status": { "const": "active" },
+          "scope": { "const": "local" },
+          "semantic_role": { "const": "fact" },
+          "review": {
+            "properties": {
+              "confirmed": { "const": false },
+              "confirmed_by": { "type": "null" },
+              "confirmed_at": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "record_type": { "const": "candidate" } }, "required": ["record_type"] },
+      "then": {
+        "properties": {
+          "kind": { "enum": ["decision", "incident", "constraint"] },
+          "status": { "const": "candidate" },
+          "scope": { "const": "local" },
+          "semantic_role": { "enum": ["fact", "inference"] },
+          "review": {
+            "properties": {
+              "confirmed": { "const": false },
+              "confirmed_by": { "type": "null" },
+              "confirmed_at": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "record_type": { "const": "project_record" } }, "required": ["record_type"] },
+      "then": {
+        "properties": {
+          "kind": { "enum": ["decision", "incident", "constraint"] },
+          "status": { "const": "active" },
+          "scope": { "const": "project" },
+          "review": {
+              "properties": {
+                "confirmed": { "const": true },
+                "confirmed_by": { "const": "explicit_user" },
+                "confirmed_at": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "format": "date-time",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:[+-]\\d{2}:\\d{2}|Z)$"
+                }
+              }
+          },
+          "provenance": {
+            "properties": {
+              "source_record_id": { "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "record_type": { "const": "project_record" },
+          "semantic_role": { "const": "instruction" }
+        },
+        "required": ["record_type", "semantic_role"]
+      },
+      "then": {
+        "properties": {
+          "kind": { "const": "constraint" }
+        }
+      }
+    }
+  ]
+}
