@@ -1,7 +1,8 @@
-"""Storage primitives for M2 local checkpoint persistence."""
+"""Storage primitives for local AgentMemory persistence."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -17,7 +18,13 @@ from .schema import (
     RecordValidationError,
     annotate_with_integrity,
     canonical_json_dumps,
+    MAX_RECORD_ID_LENGTH,
+    RECORD_ID_RE,
     validate_record,
+)
+from .render import (
+    CONTINUITY_GENERATED_HEADER,
+    render_continuity_markdown,
 )
 from .security import SecretScanError
 
@@ -112,10 +119,40 @@ def _compatible_manifest(path: Path) -> bool:
 
 def _compatible_continuity(path: Path) -> bool:
     try:
-        return path.read_text(encoding="utf-8") == CONTINUITY_PLACEHOLDER
+        text = path.read_text(encoding="utf-8")
     except Exception:
         return False
+    return text == CONTINUITY_PLACEHOLDER or text.startswith(CONTINUITY_GENERATED_HEADER)
 
+
+def _compute_project_record_id(candidate: Dict[str, Any]) -> str:
+    payload = b"agentmemory/project-record/v1\0" + candidate["integrity"]["content_hash"].encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _validate_json_object(payload: Any) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise RecordValidationError("record must be an object")
+    return payload
+
+
+def _validate_record_file(path: Path, *, label: str) -> Dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise StorageError(f"malformed {label} payload") from exc
+    except json.JSONDecodeError as exc:
+        raise StorageError(f"malformed {label} payload") from exc
+    payload = _validate_json_object(payload)
+    return validate_record(payload)
+
+
+def _candidate_payload(path: Path) -> Dict[str, Any]:
+    payload = _validate_record_file(path, label="candidate")
+    validated = validate_record(payload)
+    if validated["record_type"] != "candidate":
+        raise StorageError("candidate record type mismatch")
+    return validated
 
 def _gitignore_has_exact_ignore_line(repo_root: Path) -> bool:
     path = repo_root / ".gitignore"
@@ -139,7 +176,9 @@ def _resolve_layout(identity: Dict[str, str]) -> Dict[str, Path]:
         "manifest": continuity / "manifest.json",
         "continuity_md": continuity / "CONTINUITY.md",
         "local": local,
+        "candidate_dir": local / "worktrees" / identity["worktree_id"] / "candidates",
         "shared_records": continuity / "shared" / "records",
+        "project_records": continuity / "shared" / "records",
         "lock": local / "locks" / "write.lock",
         "checkpoint_dir": checkpoints,
     }
@@ -198,6 +237,7 @@ def _validate_path_set(layout: Dict[str, Path], repo_root: Path) -> None:
     _validate_within_root(repo_root, layout["continuity_md"], target_is_file=True)
     _validate_within_root(repo_root, repo_root / ".gitignore", target_is_file=True)
     _validate_within_root(repo_root, layout["shared_records"], target_is_file=False)
+    _validate_within_root(repo_root, layout["candidate_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["checkpoint_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["lock"], target_is_file=True)
 
@@ -222,9 +262,25 @@ def _ensure_initialized_for_checkpoint(layout: Dict[str, Path], repo_root: Path)
         raise StorageError("repository is not initialized")
 
 
+def _ensure_initialized_for_projects(layout: Dict[str, Path], repo_root: Path) -> None:
+    _validate_path_set(layout, repo_root)
+    if not layout["manifest"].exists():
+        raise StorageError("repository is not initialized")
+    if not _compatible_manifest(layout["manifest"]):
+        raise StorageError("repository is not initialized")
+    if layout["continuity_md"].exists() and not _compatible_continuity(layout["continuity_md"]):
+        raise StorageError("incompatible continuity marker")
+    if not _gitignore_has_exact_ignore_line(repo_root):
+        raise StorageError("repository is not initialized")
+
+
 def _generate_record_id() -> str:
     token = secrets.token_hex(16)
     return "cp-" + token
+
+
+def _generate_candidate_id() -> str:
+    return "cand-" + secrets.token_hex(16)
 
 
 def _normalize_record_id(record_id: Optional[str]) -> str:
@@ -274,11 +330,97 @@ def _build_record(
     return validate_record(record)
 
 
+def _build_candidate_record(
+    identity: Dict[str, str],
+    *,
+    candidate_id: str,
+    kind: str,
+    semantic_role: str,
+    summary: str,
+    content: Dict[str, Any],
+    paths: List[str],
+) -> Dict[str, Any]:
+    record = {
+        "schema_version": 1,
+        "id": candidate_id,
+        "record_type": "candidate",
+        "kind": kind,
+        "status": "candidate",
+        "semantic_role": semantic_role,
+        "summary": summary,
+        "scope": "local",
+        "applies_to": {
+            "repository_id": identity["repository_id"],
+            "worktree_id": identity["worktree_id"],
+            "branch": identity["branch"],
+            "head": identity["head"],
+            "paths": list(paths),
+        },
+        "provenance": {
+            "source": "cli",
+            "evidence_refs": [],
+            "source_record_id": candidate_id,
+        },
+        "content": content,
+        "review": {
+            "confirmed": False,
+            "confirmed_by": None,
+            "confirmed_at": None,
+        },
+        "created_at": _timestamp_utc(),
+    }
+    record = annotate_with_integrity(record, version=1)
+    return validate_record(record)
+
+
+def _build_project_record(
+    *,
+    candidate: Dict[str, Any],
+    project_id: str,
+    timestamp: str,
+) -> Dict[str, Any]:
+    record = {
+        "schema_version": 1,
+        "id": project_id,
+        "record_type": "project_record",
+        "kind": candidate["kind"],
+        "status": "active",
+        "semantic_role": candidate["semantic_role"],
+        "summary": candidate["summary"],
+        "scope": "project",
+        "applies_to": candidate["applies_to"],
+        "provenance": {
+            "source": "explicit-review",
+            "evidence_refs": list(candidate["provenance"]["evidence_refs"]),
+            "source_record_id": candidate["id"],
+        },
+        "content": candidate["content"],
+        "review": {
+            "confirmed": True,
+            "confirmed_by": "explicit_user",
+            "confirmed_at": timestamp,
+        },
+        "created_at": timestamp,
+    }
+    return annotate_with_integrity(record, version=1)
+
+
+def _project_record_signature(record: Dict[str, Any]) -> str:
+    payload = dict(record)
+    payload.pop("created_at", None)
+    review = dict(payload["review"])
+    review.pop("confirmed_at", None)
+    payload["review"] = review
+    payload.pop("integrity", None)
+    return canonical_json_dumps(payload)
+
+
 def _read_checkpoint_record(path: Path) -> Dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise RecordValidationError("record must be an object")
-    return validate_record(payload)
+    return _validate_record_file(path, label="checkpoint")
+
+
+def _read_project_record(path: Path) -> Dict[str, Any]:
+    return _validate_record_file(path, label="project")
 
 
 def _checkpoint_stable_match(path: Path, expected: Dict[str, Any]) -> bool:
@@ -293,8 +435,85 @@ def _ensure_checkpoint_idempotent(path: Path, expected: Dict[str, Any]) -> bool:
         if _checkpoint_stable_match(path, expected):
             return True
         raise StorageConflictError("checkpoint id already exists with conflicting content")
-    except (RecordValidationError, json.JSONDecodeError, OSError) as exc:
+    except (RecordValidationError, StorageError) as exc:
         raise StorageConflictError("checkpoint id already exists with invalid content") from exc
+
+
+def _ensure_candidate_idempotent(path: Path, expected: Dict[str, Any]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        payload = _read_checkpoint_record(path)
+    except (RecordValidationError, StorageError) as exc:
+        raise StorageConflictError("candidate id already exists with invalid content") from exc
+    if _stable_record_fingerprint(payload) == _stable_record_fingerprint(expected):
+        return True
+    raise StorageConflictError("candidate id already exists with conflicting content")
+
+def _validate_candidate_id(candidate_id: Any) -> str:
+    if not isinstance(candidate_id, str):
+        raise StorageError("invalid candidate id")
+    if len(candidate_id) > MAX_RECORD_ID_LENGTH:
+        raise StorageError("invalid candidate id")
+    if RECORD_ID_RE.match(candidate_id) is None:
+        raise StorageError("invalid candidate id")
+    return candidate_id
+
+
+def _validate_candidate_file(candidate_path: Path, candidate_id: str) -> Dict[str, Any]:
+    if candidate_path.stem != candidate_id:
+        raise StorageError("candidate filename mismatch")
+    if not candidate_path.exists():
+        raise StorageError("candidate record is missing")
+    info = _lstat(candidate_path)
+    if info is None:
+        raise StorageError("candidate record is missing")
+    mode = stat.S_IFMT(info.st_mode)
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise StorageError("candidate record must be a regular file")
+    payload = _candidate_payload(candidate_path)
+    if payload["id"] != candidate_id:
+        raise StorageError("candidate filename mismatch")
+    return payload
+
+
+def _iter_project_records(repo_root: Path, shared_records: Path) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for path in sorted(shared_records.iterdir(), key=lambda item: item.name):
+        _validate_within_root(repo_root, path, target_is_file=True)
+        info = _lstat(path)
+        if info is None:
+            continue
+        mode = stat.S_IFMT(info.st_mode)
+        if stat.S_ISLNK(mode):
+            raise StorageError("shared records must not contain symlinks")
+        if not stat.S_ISREG(mode):
+            raise StorageError("shared records contains invalid entry type")
+        if path.suffix != ".json":
+            raise StorageError("shared records must contain JSON files only")
+        try:
+            validated = _read_project_record(path)
+        except (RecordValidationError, StorageError) as exc:
+            raise StorageError("malformed shared project record") from exc
+        if validated["id"] != path.stem:
+            raise StorageError("shared record filename mismatch")
+        records.append(validated)
+    return records
+
+
+def _filter_project_records(
+    records: List[Dict[str, Any]],
+    identity: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    branch = identity["branch"]
+    head = identity["head"]
+    if branch == "DETACHED":
+        return [
+            record
+            for record in records
+            if record["applies_to"]["branch"] == "DETACHED" and record["applies_to"]["head"] == head
+        ]
+    return [record for record in records if record["applies_to"]["branch"] == branch]
 
 
 def _ensure_gitignore_line(repo_root: Path) -> None:
@@ -360,7 +579,7 @@ def _status_latest_checkpoint_id(
             continue
         try:
             record = _read_checkpoint_record(path)
-        except (RecordValidationError, json.JSONDecodeError, OSError) as exc:
+        except (RecordValidationError, StorageError) as exc:
             raise StorageError("malformed checkpoint payload") from exc
         if record["record_type"] != "checkpoint":
             raise StorageError("invalid checkpoint type")
@@ -443,9 +662,9 @@ def create_checkpoint(
     paths: Optional[List[str]] = None,
     *,
     record_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    ) -> Dict[str, Any]:
     if not isinstance(content, dict):
-        raise StorageError("content must be an object")
+        raise StorageError("invalid content-json")
 
     identity = _load_identity(repo_path)
     layout = _resolve_layout(identity)
@@ -490,6 +709,161 @@ def create_checkpoint(
     return {"id": prepared_id, "created": True}
 
 
+def create_candidate(
+    repo_path: Optional[Union[str, Path]],
+    kind: str,
+    summary: str,
+    content: Dict[str, Any],
+    paths: Optional[List[str]] = None,
+    *,
+    semantic_role: str = "inference",
+    record_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not isinstance(content, dict):
+        raise StorageError("invalid content-json")
+
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    lock = layout["lock"]
+    candidate_dir = layout["candidate_dir"]
+    candidate_id = _generate_candidate_id() if record_id is None else record_id
+
+    try:
+        record = _build_candidate_record(
+            identity,
+            candidate_id=candidate_id,
+            kind=kind,
+            semantic_role=semantic_role,
+            summary=summary,
+            content=content,
+            paths=list(paths or []),
+        )
+    except (RecordValidationError, SecretScanError) as exc:
+        raise StorageError("invalid candidate payload") from exc
+
+    target = candidate_dir / f"{candidate_id}.json"
+
+    _ensure_initialized_for_checkpoint(layout, repo_root)
+    _validate_within_root(repo_root, target, target_is_file=True)
+
+    with FileLock(lock):
+        _validate_path_set(layout, repo_root)
+        _validate_within_root(repo_root, target, target_is_file=True)
+        if not _is_initialized_layout(layout, repo_root, require_gitignore=True):
+            raise StorageError("repository is not initialized")
+
+        if _ensure_candidate_idempotent(target, record):
+            return {"id": candidate_id, "created": False}
+
+        try:
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(target, canonical_json_dumps(record))
+        except Exception as exc:
+            raise StorageError("candidate persistence failed") from exc
+
+    return {"id": candidate_id, "created": True}
+
+
+def _validate_candidate_business_identity(candidate: Dict[str, Any], identity: Dict[str, str]) -> None:
+    applies = candidate["applies_to"]
+    if applies["repository_id"] != identity["repository_id"]:
+        raise StorageError("candidate repository mismatch")
+    if applies["worktree_id"] != identity["worktree_id"]:
+        raise StorageError("candidate worktree mismatch")
+
+
+def _scan_source_candidate_conflict(
+    records: List[Dict[str, Any]],
+    candidate_id: str,
+    repository_id: str,
+    worktree_id: str,
+    expected_project_id: str,
+) -> None:
+    for record in records:
+        if record["provenance"]["source_record_id"] != candidate_id:
+            continue
+        applies_to = record["applies_to"]
+        if (
+            applies_to["repository_id"] == repository_id
+            and applies_to["worktree_id"] == worktree_id
+            and record["id"] != expected_project_id
+        ):
+            raise StorageConflictError("project record id conflicts with existing source candidate")
+
+
+def review_candidate(
+    repo_path: Optional[Union[str, Path]],
+    candidate_id: str,
+) -> Dict[str, Any]:
+    validated_candidate_id = _validate_candidate_id(candidate_id)
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    lock = layout["lock"]
+    candidate_path = layout["candidate_dir"] / f"{validated_candidate_id}.json"
+    shared_records = layout["project_records"]
+    continuity_md = layout["continuity_md"]
+
+    _ensure_initialized_for_projects(layout, repo_root)
+    _validate_within_root(repo_root, candidate_path, target_is_file=True)
+
+    with FileLock(lock):
+        _validate_path_set(layout, repo_root)
+        _ensure_initialized_for_projects(layout, repo_root)
+
+        _validate_within_root(repo_root, candidate_path, target_is_file=True)
+        candidate = _validate_candidate_file(candidate_path, validated_candidate_id)
+        _validate_candidate_business_identity(candidate, identity)
+
+        project_id = _compute_project_record_id(candidate)
+        project_path = shared_records / f"{project_id}.json"
+        _validate_within_root(repo_root, project_path, target_is_file=True)
+
+        existing_records = _load_validated_shared_records(identity, shared_records, repo_root) if shared_records.exists() else []
+        _scan_source_candidate_conflict(
+            existing_records,
+            candidate_id=validated_candidate_id,
+            repository_id=identity["repository_id"],
+            worktree_id=identity["worktree_id"],
+            expected_project_id=project_id,
+        )
+
+        timestamp = _timestamp_utc()
+        expected = _build_project_record(
+            candidate=candidate,
+            project_id=project_id,
+            timestamp=timestamp,
+        )
+        validated_project = validate_record(expected)
+
+        if project_path.exists():
+            existing = _read_project_record(project_path)
+            if existing["created_at"] != existing["review"]["confirmed_at"]:
+                raise StorageError("project record confirmation timestamp mismatch")
+            if _project_record_signature(existing) == _project_record_signature(validated_project):
+                result = {"id": project_id, "created": False, "candidate_id": validated_candidate_id}
+            else:
+                raise StorageConflictError("project record already exists with conflicting content")
+        else:
+            try:
+                shared_records.mkdir(parents=True, exist_ok=True)
+                _atomic_write_text(project_path, canonical_json_dumps(validated_project))
+            except Exception as exc:
+                raise StorageError("project persistence failed") from exc
+            result = {"id": project_id, "created": True, "candidate_id": validated_candidate_id}
+
+        if result["created"]:
+            existing_records = [*existing_records, validated_project]
+        included = _filter_project_records(existing_records, identity)
+        rendered = render_continuity_markdown(included, branch=identity["branch"])
+        old_bytes = _read_continuity_bytes(continuity_md)
+        if old_bytes != rendered.encode("utf-8"):
+            _atomic_write_text(continuity_md, rendered)
+
+    return result
+
+
 def get_status(repo_path: Optional[Union[str, Path]]) -> Dict[str, Any]:
     identity = _load_identity(repo_path)
     layout = _resolve_layout(identity)
@@ -517,12 +891,95 @@ def get_status(repo_path: Optional[Union[str, Path]]) -> Dict[str, Any]:
     }
 
 
+def render_continuity(repo_path: Optional[Union[str, Path]]) -> Dict[str, Any]:
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    lock = layout["lock"]
+    continuity_md = layout["continuity_md"]
+
+    _ensure_initialized_for_projects(layout, repo_root)
+
+    with FileLock(lock):
+        _validate_path_set(layout, repo_root)
+        _ensure_initialized_for_projects(layout, repo_root)
+
+        rendered_records = _load_shared_records_for_render(identity, layout["shared_records"], repo_root)
+        rendered = render_continuity_markdown(rendered_records, branch=identity["branch"])
+        try:
+            existing = _read_continuity_bytes(continuity_md).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise StorageError("cannot read continuity file") from exc
+
+        if existing != rendered:
+            _atomic_write_text(continuity_md, rendered)
+            changed = True
+        else:
+            changed = False
+
+    return {"count": len(rendered_records), "changed": changed}
+
+
+def _load_validated_shared_records(
+    identity: Dict[str, str],
+    shared_records: Path,
+    repo_root: Path,
+) -> List[Dict[str, Any]]:
+    records = _iter_project_records(repo_root, shared_records) if shared_records.exists() else []
+    filtered: List[Dict[str, Any]] = []
+    for record in records:
+        if record["record_type"] != "project_record":
+            raise StorageError("shared records must be project records")
+        if record["scope"] != "project":
+            raise StorageError("shared project records must have project scope")
+        if record["status"] != "active":
+            raise StorageError("shared project records must be active")
+        if record["provenance"]["source"] != "explicit-review":
+            raise StorageError("shared project records must have explicit-review provenance")
+        if record["review"]["confirmed"] is not True:
+            raise StorageError("shared project records must be explicitly confirmed")
+        if record["review"]["confirmed_by"] != "explicit_user":
+            raise StorageError("shared project records must be explicitly confirmed by user")
+        if record["created_at"] != record["review"]["confirmed_at"]:
+            raise StorageError("shared project records must have consistent confirmation timestamp")
+        if record["applies_to"]["repository_id"] != identity["repository_id"]:
+            raise StorageError("shared records contain records for another repository")
+        filtered.append(record)
+    return filtered
+
+
+def _load_shared_records_for_render(
+    identity: Dict[str, str],
+    shared_records: Path,
+    repo_root: Path,
+) -> List[Dict[str, Any]]:
+    return sorted(
+        _filter_project_records(
+            _load_validated_shared_records(identity, shared_records, repo_root),
+            identity,
+        ),
+        key=lambda item: item["id"],
+    )
+
+
+def _read_continuity_bytes(continuity_md: Path) -> bytes:
+    if not continuity_md.exists():
+        return b""
+    try:
+        return continuity_md.read_bytes()
+    except OSError as exc:
+        raise StorageError("cannot read continuity file") from exc
+
+
 __all__ = [
     "StorageError",
     "StorageConflictError",
     "StoragePathError",
     "initialize_repository",
     "create_checkpoint",
+    "create_candidate",
+    "review_candidate",
+    "render_continuity",
     "get_status",
     "CONTINUITY_PLACEHOLDER",
     "MANIFEST_TEMPLATE",
