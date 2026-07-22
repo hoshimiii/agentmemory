@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/hooks/agentmemory_hook.py\" session-start",
+            "commandWindows": "py -3 \"$env:PLUGIN_ROOT\\hooks\\agentmemory_hook.py\" session-start",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$PLUGIN_ROOT/hooks/agentmemory_hook.py\" pre-compact",
+            "commandWindows": "py -3 \"$env:PLUGIN_ROOT\\hooks\\agentmemory_hook.py\" pre-compact",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

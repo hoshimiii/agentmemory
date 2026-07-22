@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "probe-session-startup",
+  "payload": {
+    "matcher": "startup",
+    "notes": "m0 startup probe"
+  },
+  "unknown_field": "must be ignored"
+}

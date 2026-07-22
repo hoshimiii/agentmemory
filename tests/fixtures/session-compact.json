@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "SessionStart",
+  "session_id": "probe-session-compact",
+  "payload": {
+    "matcher": "compact",
+    "notes": "m0 compact probe"
+  },
+  "unknown_field": "must be ignored"
+}

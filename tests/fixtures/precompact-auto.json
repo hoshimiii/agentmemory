@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "PreCompact",
+  "session_id": "probe-precompact",
+  "payload": {
+    "matcher": "auto",
+    "notes": "m0 precompact probe"
+  },
+  "unknown_field": "must be ignored"
+}

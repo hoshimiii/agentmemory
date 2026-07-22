@@ -1,0 +1,20 @@
+{
+  "name": "agentmemory",
+  "version": "0.1.0",
+  "description": "Agentmemory M0 hook-only probe plugin.",
+  "author": {
+    "name": "hoshimiii"
+  },
+  "repository": "https://github.com/hoshimiii/agentmemory",
+  "interface": {
+    "displayName": "AgentMemory",
+    "shortDescription": "SessionStart and PreCompact hook probe for M0.",
+    "longDescription": "AgentMemory M0 ships a minimal plugin scaffold and no persistent memory behavior.",
+    "developerName": "hoshimiii",
+    "category": "Productivity",
+    "capabilities": [
+      "HookDispatcher"
+    ],
+    "defaultPrompt": "AgentMemory M0 is a probe plugin for hook contract behavior."
+  }
+}
