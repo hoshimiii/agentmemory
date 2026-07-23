@@ -17,6 +17,7 @@ from agentmemory.render import (
     render_resume_capsule,
 )
 from agentmemory.storage import (
+    StorageError,
     create_candidate,
     create_checkpoint,
     initialize_repository,
@@ -175,6 +176,62 @@ class TestAgentMemoryHookRuntime(unittest.TestCase):
 
             project_record_ids = [record["id"] for record in capsule["project_records"]]
             self.assertEqual(project_record_ids, sorted(project_record_ids))
+
+    def test_resume_requires_matching_local_review_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _init_git_repo(repo)
+            initialize_repository(repo)
+            create_checkpoint(repo, "checkpoint", {"value": 1}, record_id="cp-main")
+            create_candidate(
+                repo,
+                kind="decision",
+                summary="trusted project",
+                content={"value": "trusted"},
+                record_id="cand-main",
+            )
+            result = review_candidate(repo, "cand-main")
+            identity = get_git_identity(repo)
+            receipt = (
+                repo
+                / ".continuity"
+                / "local"
+                / "worktrees"
+                / identity["worktree_id"]
+                / "receipts"
+                / f"{result['id']}.json"
+            )
+            project = repo / ".continuity" / "shared" / "records" / f"{result['id']}.json"
+            payload = {
+                "hook_event_name": "SessionStart",
+                "cwd": str(repo),
+            }
+
+            trusted = _parse_context(_run_hook("session-start", payload, repo))
+            self.assertEqual([item["id"] for item in trusted["project_records"]], [result["id"]])
+
+            receipt.unlink()
+            unreceipted = _parse_context(_run_hook("session-start", payload, repo))
+            self.assertEqual(unreceipted["project_records"], [])
+
+            review_candidate(repo, "cand-main")
+            project_payload = json.loads(project.read_text(encoding="utf-8"))
+            project_payload["content"]["value"] = "externally changed"
+            project.write_text(
+                json.dumps(
+                    schema.annotate_with_integrity(project_payload, version=1),
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            changed = _parse_context(_run_hook("session-start", payload, repo))
+            self.assertEqual(changed["project_records"], [])
+
+            receipt.write_text('{"record_id":"conflicting"}', encoding="utf-8")
+            malformed = _run_hook("session-start", payload, repo)
+            self.assertEqual(malformed.stdout, FALLBACK_OUTPUT)
+            self.assertEqual(malformed.stderr, "")
 
     def test_branch_filter_and_detached_head_rule(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
@@ -657,10 +714,7 @@ class TestAgentMemoryHookRuntime(unittest.TestCase):
 
             with mock.patch(
                 "agentmemory.storage._timestamp_utc",
-                side_effect=[
-                    "2026-07-23T00:00:01Z",
-                    "2026-07-23T00:00:02Z",
-                ],
+                return_value="2099-07-23T00:00:01Z",
             ):
                 create_checkpoint(
                     repo,
@@ -668,14 +722,26 @@ class TestAgentMemoryHookRuntime(unittest.TestCase):
                     {"value": "small"},
                     record_id="cp-small",
                 )
+
+            checkpoint_dir = (
+                repo
+                / ".continuity"
+                / "local"
+                / "worktrees"
+                / get_git_identity(repo)["worktree_id"]
+                / "checkpoints"
+            )
+            before_huge = sorted(path.name for path in checkpoint_dir.iterdir())
+            with self.assertRaises(StorageError):
                 create_checkpoint(
                     repo,
                     "huge checkpoint",
                     {"payload": "x" * 6500},
                     record_id="cp-huge",
                 )
+            self.assertEqual(sorted(path.name for path in checkpoint_dir.iterdir()), before_huge)
 
-            huge = _run_hook(
+            resumed = _run_hook(
                 "session-start",
                 {
                     "hook_event_name": "SessionStart",
@@ -684,7 +750,10 @@ class TestAgentMemoryHookRuntime(unittest.TestCase):
                 },
                 repo,
             )
-            self.assertEqual(huge.stdout, FALLBACK_OUTPUT)
+            self.assertNotEqual(resumed.stdout, FALLBACK_OUTPUT)
+            context = json.loads(resumed.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertLessEqual(len(context.encode("utf-8")), MAX_RESUME_CAPSULE_CHARS)
+            self.assertEqual(_parse_context(resumed)["checkpoint"]["id"], "cp-small")
 
     def test_precompact_payload_is_idempotent_and_side_effect_free(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:

@@ -24,7 +24,7 @@ py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo revie
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo render
 ```
 
-Use `python3` instead of `py -3` on non-Windows hosts. `review --confirm` is the only path from a local candidate to tracked project memory and requires explicit user confirmation.
+Use `python3` instead of `py -3` on non-Windows hosts. `review --confirm` is the only path from a local candidate to tracked project memory and requires explicit user confirmation. Review also requires the candidate's original repository, worktree, branch, and head to still match, then creates a local receipt before that project record may enter a `SessionStart` capsule.
 
 ## Repository data
 
@@ -38,15 +38,17 @@ Use `python3` instead of `py -3` on non-Windows hosts. `review --confirm` is the
 └── local/                                # ignored
     ├── worktrees/<worktree-id>/checkpoints/*.json
     ├── worktrees/<worktree-id>/candidates/*.json
+    ├── worktrees/<worktree-id>/receipts/<record-id>.json
     └── locks/write.lock
 ```
 
-Checkpoints and candidates are isolated by Git worktree. Reviewed project records are repository-scoped and filtered by branch; detached worktrees additionally require the exact head. Tracked files can be committed or shared only through the user's normal Git workflow.
+Checkpoints, candidates, and review receipts are isolated by Git worktree. Reviewed project records are repository-scoped and filtered by branch; detached worktrees additionally require the exact head. A `SessionStart` capsule includes a project record only when this worktree's receipt has the same record id and integrity content hash. A record obtained through Git or changed by hand therefore does not automatically gain local trust; it needs another explicit review of the original, still exact-context candidate. Tracked files can be committed or shared only through the user's normal Git workflow.
 
 ## Hook behavior
 
-- `SessionStart` reads the hook payload's `cwd`. An exact repository/worktree/branch/head checkpoint produces a canonical, secret-scanned resume capsule of at most 6000 UTF-8 bytes, followed by matching confirmed project records that fit the budget.
+- `SessionStart` reads the hook payload's `cwd`. An exact repository/worktree/branch/head checkpoint produces a canonical, secret-scanned resume capsule of at most 6000 UTF-8 bytes, followed by matching confirmed project records with an exact local review receipt that fit the budget. Missing receipts skip that record; malformed or conflicting receipts fail closed.
 - If the latest branch checkpoint has a stale head, its checkpoint content is not restored. The capsule reports stale state and may still include independently valid confirmed project records.
+- Checkpoint creation rejects content that cannot fit by itself in the 6000 UTF-8 byte capsule and persists nothing for that rejected request.
 - Missing, uninitialized, malformed, unsafe, or oversized state returns the exact harmless fallback `{"continue":true}` without diagnostic leakage.
 - `SessionStart` is read-only, does not create locks or bytecode, and never reads candidates, `CONTINUITY.md`, transcripts, or `PLUGIN_DATA`.
 - `PreCompact` is a deterministic no-op returning `{"continue":true}`. Version 0.1.0 does not fabricate a checkpoint from unstable transcript data.
@@ -54,6 +56,7 @@ Checkpoints and candidates are isolated by Git worktree. Reviewed project record
 ## Safety boundaries
 
 - Candidates are never injected and never become project memory automatically.
+- A receipt prevents tracked project content from being automatically injected after a Git fetch or manual edit. It is not an unforgeable host-user approval and does not protect against a malicious local writer.
 - Memory is untrusted context; higher-priority instructions and live repository evidence always win.
 - Secret scanning blocks common credential patterns but is defense in depth, not a guarantee. Do not store credentials.
 - Memory describes prior work; it never grants authorization for external writes, deployment, deletion, or privileged actions.

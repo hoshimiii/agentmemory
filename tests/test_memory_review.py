@@ -13,14 +13,16 @@ from typing import Any, Dict, Optional
 from unittest import mock
 
 from agentmemory import schema
-from agentmemory import identity, render
+from agentmemory import identity, render, storage
 from agentmemory.storage import (
     StorageConflictError,
     StorageError,
     CONTINUITY_PLACEHOLDER,
     create_candidate,
+    create_checkpoint,
     get_status,
     initialize_repository,
+    load_resume_state,
     review_candidate,
     render_continuity,
 )
@@ -94,6 +96,19 @@ def _candidate_path(repo: Path, candidate_id: str) -> Path:
 
 def _project_records(repo: Path) -> list[Path]:
     return sorted((repo / ".continuity" / "shared" / "records").glob("*.json"))
+
+
+def _receipt_path(repo: Path, record_id: str) -> Path:
+    git_identity = identity.get_git_identity(repo)
+    return (
+        repo
+        / ".continuity"
+        / "local"
+        / "worktrees"
+        / git_identity["worktree_id"]
+        / "receipts"
+        / f"{record_id}.json"
+    )
 
 
 def _continuity_path(repo: Path) -> Path:
@@ -266,6 +281,21 @@ class TestAgentMemoryReview(unittest.TestCase):
 
             project_path = _project_records(repo)[0]
             project_bytes = project_path.read_bytes()
+            receipt_path = _receipt_path(repo, first["id"])
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            project = json.loads(project_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                receipt,
+                {
+                    "schema_version": 1,
+                    "repository_id": identity.get_git_identity(repo)["repository_id"],
+                    "worktree_id": identity.get_git_identity(repo)["worktree_id"],
+                    "record_id": first["id"],
+                    "content_hash": project["integrity"]["content_hash"],
+                },
+            )
+            self.assertNotIn("content", receipt)
+            receipt_path.unlink()
             stale = f"{render.CONTINUITY_GENERATED_HEADER}stale generated content\n"
             _continuity_path(repo).write_text(stale, encoding="utf-8")
 
@@ -275,6 +305,7 @@ class TestAgentMemoryReview(unittest.TestCase):
             ):
                 second = review_candidate(repo, "cand-review")
             self.assertFalse(second["created"])
+            self.assertTrue(receipt_path.exists())
             self.assertEqual(project_path.read_bytes(), project_bytes)
             self.assertNotEqual(_continuity_path(repo).read_text(encoding="utf-8"), stale)
             project = json.loads(project_path.read_text(encoding="utf-8"))
@@ -285,6 +316,126 @@ class TestAgentMemoryReview(unittest.TestCase):
             self.assertEqual(project["created_at"], "2026-07-23T00:00:10Z")
             self.assertEqual(project["review"]["confirmed_at"], "2026-07-23T00:00:10Z")
             self.assertEqual(project["applies_to"]["branch"], "main")
+
+    def test_review_receipt_is_worktree_local(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(
+                repo,
+                kind="decision",
+                summary="local trust",
+                content={"value": 1},
+                record_id="cand-local",
+            )
+            result = review_candidate(repo, "cand-local")
+            self.assertTrue(_receipt_path(repo, result["id"]).exists())
+
+            _run_git(["add", ".gitignore", ".continuity"], cwd=repo)
+            _run_git(["commit", "-m", "track reviewed memory"], cwd=repo)
+            linked = Path(workdir) / "linked"
+            _run_git(["worktree", "add", "-b", "linked", str(linked)], cwd=repo)
+            try:
+                self.assertFalse(_receipt_path(linked, result["id"]).exists())
+            finally:
+                _run_git(["worktree", "remove", "--force", str(linked)], cwd=repo)
+
+    def test_review_requires_candidate_checkout_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+
+            create_candidate(
+                repo,
+                kind="decision",
+                summary="stale head",
+                content={"value": 1},
+                record_id="cand-stale-head",
+            )
+            _run_git(["commit", "--allow-empty", "-m", "advance head"], cwd=repo)
+            with self.assertRaises(StorageError):
+                review_candidate(repo, "cand-stale-head")
+            self.assertEqual(_project_records(repo), [])
+            self.assertFalse(_receipt_path(repo, "placeholder").parent.exists())
+
+            create_candidate(
+                repo,
+                kind="decision",
+                summary="branch change",
+                content={"value": 2},
+                record_id="cand-branch",
+            )
+            _run_git(["checkout", "-b", "other"], cwd=repo)
+            with self.assertRaises(StorageError):
+                review_candidate(repo, "cand-branch")
+            self.assertEqual(_project_records(repo), [])
+            self.assertFalse(_receipt_path(repo, "placeholder").parent.exists())
+
+            _run_git(["checkout", "main"], cwd=repo)
+            reviewed = review_candidate(repo, "cand-branch")
+            self.assertTrue(reviewed["created"])
+            self.assertTrue(_receipt_path(repo, reviewed["id"]).exists())
+
+            _run_git(["checkout", "--detach", "HEAD"], cwd=repo)
+            create_candidate(
+                repo,
+                kind="incident",
+                summary="detached head",
+                content={"value": 3},
+                record_id="cand-detached",
+            )
+            _run_git(["commit", "--allow-empty", "-m", "advance detached head"], cwd=repo)
+            with self.assertRaises(StorageError):
+                review_candidate(repo, "cand-detached")
+            self.assertEqual(len(_project_records(repo)), 1)
+            self.assertFalse(_receipt_path(repo, "placeholder").exists())
+
+    def test_review_publishes_receipt_before_new_project_record(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_checkpoint(repo, "checkpoint", {"value": 1}, record_id="cp-main")
+            create_candidate(
+                repo,
+                kind="decision",
+                summary="publish order",
+                content={"value": 1},
+                record_id="cand-publish-order",
+            )
+            original_write = storage._atomic_write_text
+
+            def fail_receipt(path: Path, text: str) -> None:
+                if path.parent.name == "receipts":
+                    raise OSError("simulated receipt failure")
+                original_write(path, text)
+
+            with mock.patch("agentmemory.storage._atomic_write_text", side_effect=fail_receipt):
+                with self.assertRaises(StorageError):
+                    review_candidate(repo, "cand-publish-order")
+            self.assertEqual(_project_records(repo), [])
+
+            shared_records = repo / ".continuity" / "shared" / "records"
+
+            def fail_project(path: Path, text: str) -> None:
+                if path.parent == shared_records:
+                    raise OSError("simulated project failure")
+                original_write(path, text)
+
+            with mock.patch("agentmemory.storage._atomic_write_text", side_effect=fail_project):
+                with self.assertRaises(StorageError):
+                    review_candidate(repo, "cand-publish-order")
+            self.assertEqual(_project_records(repo), [])
+            self.assertEqual(
+                len(list((repo / ".continuity" / "local").rglob("receipts/*.json"))),
+                1,
+            )
+            self.assertEqual(load_resume_state(repo)["project_records"], [])
 
     def test_render_empty_order_branch_and_detached_filter(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:

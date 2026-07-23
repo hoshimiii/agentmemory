@@ -25,6 +25,7 @@ from .schema import (
 from .render import (
     CONTINUITY_GENERATED_HEADER,
     render_continuity_markdown,
+    render_resume_capsule,
 )
 from .security import SecretScanError
 
@@ -169,14 +170,16 @@ def _resolve_layout(identity: Dict[str, str]) -> Dict[str, Path]:
     repo_root = Path(identity["toplevel"])
     continuity = repo_root / ".continuity"
     local = continuity / "local"
-    checkpoints = local / "worktrees" / identity["worktree_id"] / "checkpoints"
+    worktree_local = local / "worktrees" / identity["worktree_id"]
+    checkpoints = worktree_local / "checkpoints"
     return {
         "repo_root": repo_root,
         "continuity": continuity,
         "manifest": continuity / "manifest.json",
         "continuity_md": continuity / "CONTINUITY.md",
         "local": local,
-        "candidate_dir": local / "worktrees" / identity["worktree_id"] / "candidates",
+        "candidate_dir": worktree_local / "candidates",
+        "receipt_dir": worktree_local / "receipts",
         "shared_records": continuity / "shared" / "records",
         "project_records": continuity / "shared" / "records",
         "lock": local / "locks" / "write.lock",
@@ -238,6 +241,7 @@ def _validate_path_set(layout: Dict[str, Path], repo_root: Path) -> None:
     _validate_within_root(repo_root, repo_root / ".gitignore", target_is_file=True)
     _validate_within_root(repo_root, layout["shared_records"], target_is_file=False)
     _validate_within_root(repo_root, layout["candidate_dir"], target_is_file=False)
+    _validate_within_root(repo_root, layout["receipt_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["checkpoint_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["lock"], target_is_file=True)
 
@@ -501,6 +505,69 @@ def _iter_project_records(repo_root: Path, shared_records: Path) -> List[Dict[st
     return records
 
 
+def _build_review_receipt(
+    identity: Dict[str, str],
+    record: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "repository_id": identity["repository_id"],
+        "worktree_id": identity["worktree_id"],
+        "record_id": record["id"],
+        "content_hash": record["integrity"]["content_hash"],
+    }
+
+
+def _iter_review_receipts(
+    repo_root: Path,
+    receipt_dir: Path,
+    identity: Dict[str, str],
+) -> Dict[str, Dict[str, Any]]:
+    if not receipt_dir.exists():
+        return {}
+
+    receipts: Dict[str, Dict[str, Any]] = {}
+    expected_keys = {
+        "schema_version",
+        "repository_id",
+        "worktree_id",
+        "record_id",
+        "content_hash",
+    }
+    for path in sorted(receipt_dir.iterdir(), key=lambda item: item.name):
+        _validate_within_root(repo_root, path, target_is_file=True)
+        info = _lstat(path)
+        if info is None:
+            continue
+        mode = stat.S_IFMT(info.st_mode)
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode) or path.suffix != ".json":
+            raise StorageError("review receipt entry must be a JSON file")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise StorageError("malformed review receipt") from exc
+        if not isinstance(payload, dict) or set(payload) != expected_keys:
+            raise StorageError("malformed review receipt")
+        record_id = payload["record_id"]
+        content_hash = payload["content_hash"]
+        if (
+            payload["schema_version"] != 1
+            or payload["repository_id"] != identity["repository_id"]
+            or payload["worktree_id"] != identity["worktree_id"]
+            or not isinstance(record_id, str)
+            or record_id != path.stem
+            or len(record_id) > MAX_RECORD_ID_LENGTH
+            or RECORD_ID_RE.match(record_id) is None
+            or not isinstance(content_hash, str)
+            or not content_hash.startswith("sha256:")
+            or len(content_hash) != 71
+            or any(char not in "0123456789abcdef" for char in content_hash[7:])
+        ):
+            raise StorageError("conflicting review receipt")
+        receipts[record_id] = payload
+    return receipts
+
+
 def _iter_resume_checkpoints(
     repo_root: Path,
     checkpoint_dir: Path,
@@ -552,12 +619,14 @@ def load_resume_state(repo_path: Optional[Union[str, Path]] = None) -> Dict[str,
     manifest = layout["manifest"]
     checkpoint_dir = layout["checkpoint_dir"]
     shared_records = layout["shared_records"]
+    receipt_dir = layout["receipt_dir"]
     gitignore = repo_root / ".gitignore"
 
     _validate_within_root(repo_root, manifest, target_is_file=True)
     _validate_within_root(repo_root, gitignore, target_is_file=True)
     _validate_within_root(repo_root, checkpoint_dir, target_is_file=False)
     _validate_within_root(repo_root, shared_records, target_is_file=False)
+    _validate_within_root(repo_root, receipt_dir, target_is_file=False)
 
     if not manifest.exists():
         raise StorageError("repository is not initialized")
@@ -589,7 +658,7 @@ def load_resume_state(repo_path: Optional[Union[str, Path]] = None) -> Dict[str,
     checkpoint = None if stale_head else latest_checkpoint
 
     project_records = (
-        _load_shared_records_for_render(identity, shared_records, repo_root)
+        _load_shared_records_for_resume(identity, shared_records, receipt_dir, repo_root)
         if (checkpoint is not None or stale_head)
         else []
     )
@@ -787,6 +856,17 @@ def create_checkpoint(
     except (RecordValidationError, SecretScanError) as exc:
         raise StorageError("invalid checkpoint payload") from exc
 
+    if render_resume_capsule(
+        {
+            "branch": identity["branch"],
+            "head": identity["head"],
+            "stale_head": False,
+            "checkpoint": record,
+            "project_records": [],
+        }
+    ) is None:
+        raise StorageError("checkpoint exceeds resume capsule budget")
+
     target = checkpoint_dir / f"{prepared_id}.json"
 
     _ensure_initialized_for_checkpoint(layout, repo_root)
@@ -873,6 +953,8 @@ def _validate_candidate_business_identity(candidate: Dict[str, Any], identity: D
         raise StorageError("candidate repository mismatch")
     if applies["worktree_id"] != identity["worktree_id"]:
         raise StorageError("candidate worktree mismatch")
+    if applies["branch"] != identity["branch"] or applies["head"] != identity["head"]:
+        raise StorageError("candidate checkout mismatch")
 
 
 def _scan_source_candidate_conflict(
@@ -905,6 +987,7 @@ def review_candidate(
     lock = layout["lock"]
     candidate_path = layout["candidate_dir"] / f"{validated_candidate_id}.json"
     shared_records = layout["project_records"]
+    receipt_dir = layout["receipt_dir"]
     continuity_md = layout["continuity_md"]
 
     _ensure_initialized_for_projects(layout, repo_root)
@@ -913,6 +996,7 @@ def review_candidate(
     with FileLock(lock):
         _validate_path_set(layout, repo_root)
         _ensure_initialized_for_projects(layout, repo_root)
+        identity = _load_identity(repo_root)
 
         _validate_within_root(repo_root, candidate_path, target_is_file=True)
         candidate = _validate_candidate_file(candidate_path, validated_candidate_id)
@@ -920,7 +1004,9 @@ def review_candidate(
 
         project_id = _compute_project_record_id(candidate)
         project_path = shared_records / f"{project_id}.json"
+        receipt_path = receipt_dir / f"{project_id}.json"
         _validate_within_root(repo_root, project_path, target_is_file=True)
+        _validate_within_root(repo_root, receipt_path, target_is_file=True)
 
         existing_records = _load_validated_shared_records(identity, shared_records, repo_root) if shared_records.exists() else []
         _scan_source_candidate_conflict(
@@ -944,18 +1030,29 @@ def review_candidate(
             if existing["created_at"] != existing["review"]["confirmed_at"]:
                 raise StorageError("project record confirmation timestamp mismatch")
             if _project_record_signature(existing) == _project_record_signature(validated_project):
+                reviewed_project = existing
                 result = {"id": project_id, "created": False, "candidate_id": validated_candidate_id}
             else:
                 raise StorageConflictError("project record already exists with conflicting content")
         else:
+            reviewed_project = validated_project
+            result = {"id": project_id, "created": True, "candidate_id": validated_candidate_id}
+
+        try:
+            receipt_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(
+                receipt_path,
+                canonical_json_dumps(_build_review_receipt(identity, reviewed_project)),
+            )
+        except Exception as exc:
+            raise StorageError("review receipt persistence failed") from exc
+
+        if result["created"]:
             try:
                 shared_records.mkdir(parents=True, exist_ok=True)
                 _atomic_write_text(project_path, canonical_json_dumps(validated_project))
             except Exception as exc:
                 raise StorageError("project persistence failed") from exc
-            result = {"id": project_id, "created": True, "candidate_id": validated_candidate_id}
-
-        if result["created"]:
             existing_records = [*existing_records, validated_project]
         included = _filter_project_records(existing_records, identity)
         rendered = render_continuity_markdown(included, branch=identity["branch"])
@@ -1062,6 +1159,24 @@ def _load_shared_records_for_render(
         ),
         key=lambda item: item["id"],
     )
+
+
+def _load_shared_records_for_resume(
+    identity: Dict[str, str],
+    shared_records: Path,
+    receipt_dir: Path,
+    repo_root: Path,
+) -> List[Dict[str, Any]]:
+    records = _load_shared_records_for_render(identity, shared_records, repo_root)
+    receipts = _iter_review_receipts(repo_root, receipt_dir, identity)
+    return [
+        record
+        for record in records
+        if (
+            record["id"] in receipts
+            and receipts[record["id"]]["content_hash"] == record["integrity"]["content_hash"]
+        )
+    ]
 
 
 def _read_continuity_bytes(continuity_md: Path) -> bytes:

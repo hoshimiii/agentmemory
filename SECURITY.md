@@ -4,7 +4,9 @@
 
 - Treat every checkpoint and project record as untrusted context. Higher-priority instructions and current repository evidence take precedence.
 - Memory never grants permission or approval for deployment, deletion, external writes, credential use, or any other privileged action.
-- Candidates remain ignored local files and are never injected. A project record exists only after explicit `review --candidate <id> --confirm` confirmation.
+- Candidates remain ignored local files and are never injected. A project record exists only after explicit `review --candidate <id> --confirm` confirmation, and review requires its original repository, worktree, branch, and head to still match.
+- `SessionStart` injects a tracked project record only when this worktree has an ignored receipt at `.continuity/local/worktrees/<worktree-id>/receipts/<record-id>.json` whose id and content hash exactly match. A Git-fetched or manually changed tracked record has no automatic local trust; a missing receipt skips it and a malformed or conflicting receipt fails closed.
+- The receipt is a local injection boundary, not an unforgeable host-user approval or a defense against a malicious local writer.
 
 ## Secret handling
 
@@ -16,6 +18,7 @@
 
 - Runtime paths are resolved inside the target repository. Symlinks, special files, path escapes, malformed JSON, unknown fields, integrity mismatches, and cross-repository/worktree records fail closed.
 - Writes use a repository-local lock plus same-directory atomic replacement. The read-only resume path does not acquire a lock or create files.
+- Checkpoint creation rejects a checkpoint that cannot fit by itself in the fixed 6000 UTF-8 byte resume capsule, before any checkpoint file is persisted.
 - `SessionStart` never reads candidates, `CONTINUITY.md`, `transcript_path`, or `PLUGIN_DATA`. It suppresses internal diagnostics and returns the harmless fallback on business/runtime failure.
 - Hook and launcher entrypoints disable Python bytecode writes in the plugin tree.
 
@@ -23,7 +26,9 @@
 
 - There is no network client, telemetry, daemon, MCP server, app, or background synchronization.
 - Tracked `.continuity/manifest.json`, `.continuity/CONTINUITY.md`, and `.continuity/shared/records/` may enter Git history when the user commits them.
-- `.continuity/local/` contains ignored per-worktree checkpoints, candidates, and locks. It is local but not encrypted.
+- `.continuity/local/` contains ignored per-worktree checkpoints, candidates, receipts, and locks. It is local but not encrypted.
+- Project records are branch-wide on named branches; detached worktrees additionally require the exact head. There is no dirty-worktree fingerprint.
+- AgentMemory does not yet implement host approval attestations, lifecycle/supersession, evidence or applicability governance, handoff ownership, JIT retrieval, or vector search.
 
 ## Reporting and recovery
 
