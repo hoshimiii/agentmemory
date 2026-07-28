@@ -24,11 +24,15 @@
 
 ## Scope
 
-- There is no network client, telemetry, daemon, MCP server, app, or background synchronization.
+- OpenViking retrieval is explicit, read-only, and untrusted. It accepts only resources below the exact repository-derived URI `viking://resources/projects/repo-<repository_id>`; notes, debug, shared roots, memories, skills, and cross-project results fail closed.
+- The operator separately indexes that URI and supplies an absolute native executable plus an absolute `ovcli.conf`; AgentMemory does not install, start, configure, or mutate OpenViking, and never invokes wrappers such as `.cmd`, `.bat`, or `.ps1`.
+- The external CLI sends the query and project URI to the endpoint selected by `ovcli.conf`. AgentMemory does not verify that endpoint; use a loopback endpoint when local-only processing is required.
+- Retrieval never reads resource content, writes repository state, promotes content, or injects it into `SessionStart`. Relative path, mtime, and SHA-256 in its result are current local-file evidence, not an OpenViking server index hash.
+- AgentMemory itself contains no socket client, telemetry, daemon, MCP server, app, or background synchronization. OpenViking is separately operated and may connect to a non-local endpoint if the supplied config selects one.
 - Tracked `.continuity/manifest.json`, `.continuity/CONTINUITY.md`, and `.continuity/shared/records/` may enter Git history when the user commits them.
 - `.continuity/local/` contains ignored per-worktree checkpoints, candidates, receipts, and locks. It is local but not encrypted.
 - Project records are branch-wide on named branches; detached worktrees additionally require the exact head. There is no dirty-worktree fingerprint.
-- AgentMemory does not yet implement host approval attestations, lifecycle/supersession, evidence or applicability governance, handoff ownership, JIT retrieval, or vector search.
+- AgentMemory does not yet implement host approval attestations, lifecycle/supersession, evidence or applicability governance, or handoff ownership. Optional OpenViking retrieval remains untrusted external lookup, not AgentMemory memory.
 
 ## Reporting and recovery
 

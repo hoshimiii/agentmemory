@@ -7,6 +7,7 @@ import json
 import sys
 from typing import Any, Optional, Sequence
 
+from .openviking import OpenVikingError, retrieve_project_knowledge
 from .schema import RecordValidationError
 from .storage import (
     StorageConflictError,
@@ -94,6 +95,12 @@ def _build_parser() -> argparse.ArgumentParser:
     review.add_argument("--confirm", action="store_true", required=True)
 
     command.add_parser("render")
+
+    retrieve = command.add_parser("retrieve")
+    retrieve.add_argument("--query", required=True)
+    retrieve.add_argument("--openviking-cli", dest="openviking_cli", required=True)
+    retrieve.add_argument("--openviking-config", dest="openviking_config", required=True)
+    retrieve.add_argument("--limit", type=int, choices=range(1, 6), default=3)
     return parser
 
 
@@ -170,10 +177,21 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             _print_json(payload)
             return 0
 
+        if args.command == "retrieve":
+            payload = retrieve_project_knowledge(
+                args.repo,
+                args.query,
+                args.openviking_cli,
+                args.openviking_config,
+                limit=args.limit,
+            )
+            _print_json(payload)
+            return 0
+
         _emit_error("error: unsupported command")
         return 2
 
-    except (RecordValidationError, StorageConflictError, StorageError, ValueError) as exc:
+    except (OpenVikingError, RecordValidationError, StorageConflictError, StorageError, ValueError):
         _emit_error("error: operation failed")
         return 1
 

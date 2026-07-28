@@ -12,7 +12,7 @@ It does not collect full chats, transcripts, tool output, process telemetry, `PL
 
 ## Data movement
 
-The plugin contains no network or telemetry code and performs no upload, synchronization, cross-repository reuse, or workspace/global promotion. Tracked project records and `CONTINUITY.md` can leave the machine only if the user includes them in a separate Git or file-sharing action.
+The plugin contains no socket or telemetry client and performs no synchronization, cross-repository reuse, or workspace/global promotion. Optional retrieval invokes an operator-provided OpenViking executable and passes it an explicit config, query, and repository-derived project URI. The external CLI may send that query and URI to the endpoint selected by `ovcli.conf`; AgentMemory does not verify that the endpoint is local, so use a loopback endpoint for local-only processing. Retrieval does not send repository file contents, create indexes, or query notes, debug, shared roots, or other projects. Tracked project records and `CONTINUITY.md` can leave the machine only if the user includes them in a separate Git or file-sharing action.
 
 ## Retention and deletion
 

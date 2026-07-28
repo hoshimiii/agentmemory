@@ -9,7 +9,7 @@ AgentMemory is a Python 3.9+ local-first Codex plugin for explicit project check
 - `skills/agentmemory/`: one public skill and a thin launcher that works from outside the plugin directory.
 - `schemas/record-v1.schema.json`: the mirrored v1 record contract.
 
-No MCP server, app, daemon, UI, workspace/global memory, network service, or automatic transcript processing is included.
+No MCP server, app, daemon, UI, workspace/global memory, cloud service, telemetry, upload, or automatic transcript processing is included. OpenViking retrieval is an optional separately operated external process.
 
 ## Explicit CLI
 
@@ -22,9 +22,14 @@ py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo check
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo candidate propose --kind decision --summary "selected adapter" --content-json '{"decision":"use adapter A"}' --semantic-role fact --path src/adapter.py
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo review --candidate cand-example --confirm
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo render
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo retrieve --query "find source" --openviking-cli C:\OpenViking\ov.exe --openviking-config C:\OpenViking\ovcli.conf --limit 3
 ```
 
 Use `python3` instead of `py -3` on non-Windows hosts. `review --confirm` is the only path from a local candidate to tracked project memory and requires explicit user confirmation. Review also requires the candidate's original repository, worktree, branch, and head to still match, then creates a local receipt before that project record may enter a `SessionStart` capsule.
+
+`retrieve` is an explicit, read-only, untrusted external lookup. It does not require `init`, write repository state, promote content into AgentMemory, or inject anything into `SessionStart`. The repository Git identity determines the only allowed OpenViking root: `viking://resources/projects/repo-<repository_id>`. Notes, debug, shared roots, and other projects are rejected; there is no fallback.
+
+The operator must separately index the current repository under that exact URI and provide both an absolute native OpenViking executable (not `.cmd`, `.bat`, or `.ps1`) and an absolute `ovcli.conf` path. AgentMemory passes that config through `OPENVIKING_CLI_CONFIG_FILE`; it does not install, start, configure, or mutate OpenViking and never creates the index. The external CLI sends the query and project URI to the endpoint selected by that config. Use a loopback endpoint for local-only operation; AgentMemory does not verify that endpoint. Returned relative path, mtime, and SHA-256 are checked against the current local file; the SHA-256 is not an OpenViking server-index hash. Run retrieval only when explicitly requested or needed for the user's task.
 
 ## Repository data
 
@@ -60,6 +65,7 @@ Checkpoints, candidates, and review receipts are isolated by Git worktree. Revie
 - Memory is untrusted context; higher-priority instructions and live repository evidence always win.
 - Secret scanning blocks common credential patterns but is defense in depth, not a guarantee. Do not store credentials.
 - Memory describes prior work; it never grants authorization for external writes, deployment, deletion, or privileged actions.
+- OpenViking retrieval is external untrusted context only: it cannot auto-review, auto-promote, or enter a resume capsule.
 - See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).
 
 ## Validation

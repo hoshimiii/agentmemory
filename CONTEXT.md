@@ -1,6 +1,64 @@
 # Context
 
-## State
+## Current Brief
+
+This turn's only goal: add a project-scoped, read-only OpenViking knowledge retrieval boundary on top of the accepted M6 AgentMemory trust model.
+
+### Deliverables
+
+- Derive or require one stable OpenViking project URI for the current Git repository; never search a shared projects root implicitly.
+- Require every knowledge query to carry that exact project URI and return bounded source provenance sufficient to identify the originating URI and local source when OpenViking exposes it.
+- Keep retrieved knowledge untrusted and read-only. It must never create, confirm, promote, or inject an AgentMemory checkpoint/project record without the existing explicit candidate and `review --confirm` path.
+- Keep global `notes` and `debug` collections outside the project retrieval command; no cross-domain fallback.
+- Add focused tests and accurate plugin/CLI documentation without weakening M6 receipt, identity, secret, or byte-budget checks.
+
+### Non-goals
+
+- No browser-extension changes or browser-memory integration.
+- No OpenViking daemon, vector database, indexing implementation, automatic repository scan, global/workspace memory, MCP/app/UI, cloud sync, or mutation of `E:\OpenVikingKB`.
+- No automatic query at `SessionStart`, no transcript/tool-output access, and no automatic memory promotion.
+- No installation, remote push, deployment, or modification of monitored project files outside this repository.
+
+### Settled Contracts
+
+- The exact project root is `viking://resources/projects/repo-<repository_id>`, derived from the existing Git common-directory identity. Human-readable or shared-root URI overrides are not accepted.
+- Add one explicit read-only `retrieve` CLI command. It uses an absolute native OpenViking executable path plus an explicit absolute `ovcli.conf`, invokes subprocesses without a shell, performs `health`, then searches only the derived root with `level=2` and `context_type=resource`.
+- Returned candidates are bounded, marked untrusted, and restricted to strict descendants of the derived root. Any memory/skill/cross-domain result fails the entire operation.
+- Provenance reports the exact OpenViking URI and server `modTime`; local source path, current modification time, and current SHA-256 may be reported only after a safe repo-relative mapping and regular-file validation, explicitly labeled as current local evidence rather than an OpenViking index hash.
+- Retrieval does not call `read`, import AgentMemory storage/render/hooks, require AgentMemory initialization, or create any repository state.
+
+### File and Phase Scope
+
+- Investigation: current CLI, identity/storage/render/hook boundaries, package metadata, tests, and the installed OpenViking CLI contract.
+- Implementation is limited to a new `agentmemory/openviking.py`, the `retrieve` CLI surface, the shared Git identity decoder needed for non-ASCII repositories, focused retrieval tests, the public skill, and accurate README/security/privacy/package descriptions. Do not modify hooks, record schemas, storage layout, receipts, or rendering.
+- Work is isolated on `codex/m7-project-scoped-openviking`, based on M6 commit `8c1d0a95b004a78bb82f3871aea78e84bf2c0fef`.
+
+### Acceptance
+
+- Existing M6 test suites remain green.
+- New tests prove exact project-URI enforcement, rejection of shared/global/domain-crossing URIs, bounded provenance, read-only failure behavior, and no AgentMemory state writes during retrieval.
+- Missing/unhealthy/malformed OpenViking fails closed without blocking ordinary AgentMemory status/checkpoint/resume behavior.
+- Git identity preserves non-ASCII repository paths so the deterministic URI works in this checkout.
+- `compileall`, Python 3.9 AST parsing, JSON parsing, skill/plugin validation, and `git diff --check` pass.
+
+### Stop Conditions
+
+- Stop and return to root if implementation requires an OpenViking server/config mutation, a new automatic hook event, a schema compatibility break, credential access, external publication, or weakening the M6 confirmation boundary.
+- Stop if the project URI cannot be bound to the current Git repository without an unresolved product decision.
+
+## Pending List
+
+- No code blocker remains. External indexing is intentionally operator-owned; the current deterministic project URI is healthy but has no indexed resources, so live retrieval correctly returns an empty result.
+
+## M7 Acceptance Evidence
+
+- Focused retrieval and CLI suite: 8 passed.
+- Full regression suite: 89 passed, with 2 expected Windows FIFO skips.
+- Python 3.9 AST parsing, `compileall`, JSON parsing, skill validation, plugin validation, and `git diff --check` passed.
+- Live native OpenViking retrieval used the explicit config, returned the exact repository-derived URI with `results: []`, exited 0, and left Git status unchanged.
+- Fresh Terra xhigh review found and then verified fixes for explicit CLI config discovery, endpoint disclosure, non-ASCII Git paths, absolute wrapper rejection, and leaf/parent reparse races; final review reported no P0-P3 findings.
+
+## Accepted Baseline
 - M0 hook-only baseline is at commit `8875076`.
 - M1 core-contract passed independent Terra acceptance and is committed as `9f9290d`.
 - M2 local checkpoint storage passed independent Terra acceptance and is committed as `2c7ec8e`.

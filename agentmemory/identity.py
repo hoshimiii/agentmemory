@@ -33,6 +33,8 @@ def _run_git(args: Sequence[str], cwd: Path, timeout: float) -> List[str]:
         result = subprocess.run(
             command,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
