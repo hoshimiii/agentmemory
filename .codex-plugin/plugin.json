@@ -1,6 +1,6 @@
 {
   "name": "agentmemory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first project continuity with explicit checkpoints and reviewed memory.",
   "author": {
     "name": "hoshimiii"

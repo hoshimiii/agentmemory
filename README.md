@@ -1,4 +1,4 @@
-# AgentMemory 0.1.0
+# AgentMemory 0.1.1
 
 AgentMemory is a Python 3.9+ local-first Codex plugin for explicit project checkpoints, review-gated project memory, and bounded session resume. It uses the standard library only and does not depend on Superpowers.
 
@@ -56,7 +56,7 @@ Checkpoints, candidates, and review receipts are isolated by Git worktree. Revie
 - Checkpoint creation rejects content that cannot fit by itself in the 6000 UTF-8 byte capsule and persists nothing for that rejected request.
 - Missing, uninitialized, malformed, unsafe, or oversized state returns the exact harmless fallback `{"continue":true}` without diagnostic leakage.
 - `SessionStart` is read-only, does not create locks or bytecode, and never reads candidates, `CONTINUITY.md`, transcripts, or `PLUGIN_DATA`.
-- `PreCompact` is a deterministic no-op returning `{"continue":true}`. Version 0.1.0 does not fabricate a checkpoint from unstable transcript data.
+- `PreCompact` is a deterministic no-op returning `{"continue":true}`. Version 0.1.1 does not fabricate a checkpoint from unstable transcript data.
 
 ## Safety boundaries
 

@@ -218,7 +218,7 @@ class TestPluginPackageE2E(unittest.TestCase):
     def test_package_contract(self) -> None:
         manifest = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
         self.assertEqual(manifest.get("name"), "agentmemory")
-        self.assertEqual(manifest.get("version"), "0.1.0")
+        self.assertEqual(manifest.get("version"), "0.1.1")
         self.assertEqual(manifest.get("skills"), "./skills/")
         self.assertNotIn("hooks", manifest)
         self.assertNotIn("mcpServers", manifest)
