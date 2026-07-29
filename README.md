@@ -1,6 +1,6 @@
 # AgentMemory 0.1.1
 
-AgentMemory is a Python 3.9+ local-first Codex plugin for explicit project checkpoints, review-gated project memory, and bounded session resume. It uses the standard library only and does not depend on Superpowers.
+AgentMemory is a Python 3.9+ local-first Codex plugin for explicit project checkpoints, review-gated project memory, bounded session resume, and explicit task-scoped experience lookup. It uses the standard library only and does not depend on Superpowers.
 
 ## Components
 
@@ -8,6 +8,7 @@ AgentMemory is a Python 3.9+ local-first Codex plugin for explicit project check
 - `hooks/hooks.json`: the default-discovered `SessionStart` and `PreCompact` hooks.
 - `skills/agentmemory/`: one public skill and a thin launcher that works from outside the plugin directory.
 - `schemas/record-v1.schema.json`: the mirrored v1 record contract.
+- `schemas/experience-v2.schema.json`: the separate v2 strategy/warning experience contract.
 
 No MCP server, app, daemon, UI, workspace/global memory, cloud service, telemetry, upload, or automatic transcript processing is included. OpenViking retrieval is an optional separately operated external process.
 
@@ -21,11 +22,15 @@ py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo statu
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo checkpoint create --summary "next step" --content-json '{"objective":"finish integration"}' --path src/module.py
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo candidate propose --kind decision --summary "selected adapter" --content-json '{"decision":"use adapter A"}' --semantic-role fact --path src/adapter.py
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo review --candidate cand-example --confirm
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo candidate propose --kind strategy --summary "repair a receipt mismatch" --content-json '{"body":"Check the record id and content hash before resuming."}' --experience-json '{"applicability":{"task_types":["bugfix"],"signals":["memory.receipt"],"error_patterns":[]},"evidence":{"checks":[{"command":"py -3 -m unittest discover -s tests -p test_memory_review.py -v","exit_code":0,"observed_at":"2026-07-29T12:00:00Z","git_head":"UNBORN","result_digest":null}]},"lineage":{"supersedes":[],"deprecates":[]},"relation":{"strategy_id":null}}'
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo experience match --task-type bugfix --signal memory.receipt --path agentmemory/storage.py --max-bytes 8192
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo render
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo retrieve --query "find source" --openviking-cli C:\OpenViking\ov.exe --openviking-config C:\OpenViking\ovcli.conf --limit 3
 ```
 
-Use `python3` instead of `py -3` on non-Windows hosts. `review --confirm` is the only path from a local candidate to tracked project memory and requires explicit user confirmation. Review also requires the candidate's original repository, worktree, branch, and head to still match, then creates a local receipt before that project record may enter a `SessionStart` capsule.
+Use `python3` instead of `py -3` on non-Windows hosts. Every writing command requires an explicit user request. `review --confirm` is the only path from a local candidate to tracked project memory and requires immediate explicit user confirmation. Review also requires the candidate's original repository, worktree, branch, and head to still match, then creates a local receipt before that project record may enter its allowed view.
+
+There are three separate layers: v1 continuity tracks checkpoints and confirmed project facts for bounded `SessionStart`; v2 experience stores explicitly reviewed `strategy` and `warning` records for an explicit `experience match`; OpenViking is a separately operated, read-only lookup. Experience matching is deterministic, read-only, and untrusted: it accepts only explicit task types, signals, error patterns, and paths, never infers task text or reads transcripts, `PLUGIN_DATA`, or Hook payload task data. Evidence metadata records command text, exit code, time, Git head, and optional digest; it never executes commands and is not proof of coverage or promotion.
 
 `retrieve` is an explicit, read-only, untrusted external lookup. It does not require `init`, write repository state, promote content into AgentMemory, or inject anything into `SessionStart`. The repository Git identity determines the only allowed OpenViking root: `viking://resources/projects/repo-<repository_id>`. Notes, debug, shared roots, and other projects are rejected; there is no fallback.
 
@@ -40,14 +45,17 @@ The operator must separately index the current repository under that exact URI a
 ├── manifest.json                         # tracked contract
 ├── CONTINUITY.md                         # tracked deterministic rendering
 ├── shared/records/*.json                 # tracked reviewed project records
+├── shared/experiences/*.json             # tracked reviewed v2 strategy/warning records
 └── local/                                # ignored
     ├── worktrees/<worktree-id>/checkpoints/*.json
     ├── worktrees/<worktree-id>/candidates/*.json
-    ├── worktrees/<worktree-id>/receipts/<record-id>.json
+    ├── worktrees/<worktree-id>/receipts/<record-id>.json # v1/v2 local trust receipts
     └── locks/write.lock
 ```
 
-Checkpoints, candidates, and review receipts are isolated by Git worktree. Reviewed project records are repository-scoped and filtered by branch; detached worktrees additionally require the exact head. A `SessionStart` capsule includes a project record only when this worktree's receipt has the same record id and integrity content hash. A record obtained through Git or changed by hand therefore does not automatically gain local trust; it needs another explicit review of the original, still exact-context candidate. Tracked files can be committed or shared only through the user's normal Git workflow.
+Checkpoints, candidates, and review receipts are isolated by Git worktree. Reviewed project records are repository-scoped and filtered by branch; detached worktrees additionally require the exact head. A `SessionStart` capsule includes a v1 project record only when this worktree's receipt has the same record id and integrity content hash. V2 experiences never enter `CONTINUITY.md`, `load_resume_state()`, or `SessionStart`; they require an explicit match and their own matching receipt. A record obtained through Git or changed by hand therefore does not automatically gain local trust; it needs another explicit review of the original, still exact-context candidate. Tracked files can be committed or shared only through the user's normal Git workflow.
+
+V2 records are immutable. A reviewed successor derives an older same-kind record as `superseded`; a reviewed deprecator derives a target as `deprecated`. No record is edited, reactivated, or deleted by this lifecycle. A match begins at 8192 bytes, adds 2048 bytes per activated strategy-warning relationship, and caps at 24576 bytes; `--max-bytes` can only lower that effective budget. The 6000-byte `SessionStart` capsule is unchanged.
 
 ## Hook behavior
 
@@ -66,6 +74,8 @@ Checkpoints, candidates, and review receipts are isolated by Git worktree. Revie
 - Secret scanning blocks common credential patterns but is defense in depth, not a guarantee. Do not store credentials.
 - Memory describes prior work; it never grants authorization for external writes, deployment, deletion, or privileged actions.
 - OpenViking retrieval is external untrusted context only: it cannot auto-review, auto-promote, or enter a resume capsule.
+- Experience match output is untrusted, explicit, and read-only; it cannot auto-review, auto-promote, execute evidence commands, or enter a resume capsule.
+- This release has no transcript processing, automatic signal extraction, promotion, Hub, Capsule, Event, replay, or shadow-routing feature.
 - See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).
 
 ## Validation
@@ -80,6 +90,6 @@ The test suite validates the runtime and package from source without installing 
 
 ## Rollback and retention
 
-Each milestone is archived on a separate Git branch. Reverting the plugin code does not delete `.continuity` data. Removing or disabling the plugin also leaves project data intact; back up and remove `.continuity` separately only when the user explicitly wants to purge it.
+Each milestone is archived on a separate Git branch. Reverting the plugin code does not delete `.continuity` data, including `shared/experiences/` and local receipts. Removing or disabling the plugin also leaves project data intact; back up and remove `.continuity` separately only when the user explicitly wants to purge it.
 
 Installed-host loading and Hook trust remain a separate approval gate. This repository does not claim that gate has been completed.

@@ -25,6 +25,7 @@ LAUNCHER = ROOT / "skills" / "agentmemory" / "scripts" / "agentmemory_cli.py"
 README = ROOT / "README.md"
 SECURITY = ROOT / "SECURITY.md"
 PRIVACY = ROOT / "PRIVACY.md"
+EXPERIENCE_SCHEMA = ROOT / "schemas" / "experience-v2.schema.json"
 HOOK = ROOT / "hooks" / "agentmemory_hook.py"
 HOOKS_DIR = ROOT / "hooks"
 SKILL_DIR = ROOT / "skills" / "agentmemory"
@@ -41,6 +42,7 @@ LINKED_BRANCH = "linked"
 LINKED_CHECKPOINT = "cp-linked"
 SECRET_CANDIDATE = "cand-secret"
 SECRET_SENTINEL = "sk-secret-token-abcdefghijklmnopq"
+EXPERIENCE_CANDIDATE = "cand-receipt-strategy"
 
 
 def _run_git(
@@ -225,6 +227,8 @@ class TestPluginPackageE2E(unittest.TestCase):
         self.assertNotIn("apps", manifest)
 
         self.assertTrue(HOOKS_JSON.exists())
+        self.assertTrue(EXPERIENCE_SCHEMA.exists())
+        self.assertEqual(json.loads(EXPERIENCE_SCHEMA.read_text(encoding="utf-8"))["properties"]["schema_version"]["const"], 2)
         skills = [path for path in (ROOT / "skills").iterdir() if path.is_dir()]
         self.assertEqual(len(skills), 1)
         self.assertEqual(skills[0].name, "agentmemory")
@@ -239,6 +243,8 @@ class TestPluginPackageE2E(unittest.TestCase):
         self.assertIn("confirmation", skill_text_lower)
         self.assertIn("untrusted", skill_text_lower)
         self.assertIn("transcript", skill_text_lower)
+        self.assertIn("experience match", skill_text_lower)
+        self.assertIn("24576", skill_text_lower)
 
         self.assertTrue(LAUNCHER.exists())
         self.assertTrue(OPENAI_YAML.exists())
@@ -374,6 +380,60 @@ class TestPluginPackageE2E(unittest.TestCase):
                 self.assertEqual(project_records[0]["record_type"], "project_record")
                 self.assertEqual(project_records[0]["summary"], "primary decision")
                 self.assertEqual([record["record_type"] for record in project_records], ["project_record"])
+
+                experience_candidate = _run_launcher_json(
+                    [
+                        "candidate",
+                        "propose",
+                        "--id",
+                        EXPERIENCE_CANDIDATE,
+                        "--kind",
+                        "strategy",
+                        "--summary",
+                        "repair receipt mismatch",
+                        "--content-json",
+                        json.dumps({"body": "Check id and content hash before resuming."}, separators=(",", ":")),
+                        "--experience-json",
+                        json.dumps(
+                            {
+                                "applicability": {
+                                    "task_types": ["bugfix"],
+                                    "signals": ["memory.receipt"],
+                                    "error_patterns": [],
+                                },
+                                "evidence": {"checks": []},
+                                "lineage": {"supersedes": [], "deprecates": []},
+                                "relation": {"strategy_id": None},
+                            },
+                            separators=(",", ":"),
+                        ),
+                    ],
+                    repo,
+                    launcher_cwd,
+                )
+                self.assertEqual(experience_candidate["id"], EXPERIENCE_CANDIDATE)
+                experience_review = _run_launcher_json(
+                    ["review", "--candidate", EXPERIENCE_CANDIDATE, "--confirm"], repo, launcher_cwd
+                )
+                experience_id = experience_review["id"]
+                experience_path = repo / ".continuity" / "shared" / "experiences" / f"{experience_id}.json"
+                self.assertTrue(experience_path.exists())
+                self.assertTrue((repo / ".continuity" / "local" / "worktrees" / get_git_identity(repo)["worktree_id"] / "receipts" / f"{experience_id}.json").exists())
+                match = _run_launcher_json(
+                    ["experience", "match", "--task-type", "bugfix", "--signal", "memory.receipt"],
+                    repo,
+                    launcher_cwd,
+                )
+                self.assertEqual(match["selected_count"], 1)
+                self.assertEqual(match["selected"][0]["id"], experience_id)
+                self.assertEqual(match["byte_budget"], 8192)
+                continuity_text = (repo / ".continuity" / "CONTINUITY.md").read_text(encoding="utf-8")
+                self.assertNotIn(experience_id, continuity_text)
+                _, experience_start_context = _parse_session_start(
+                    _run_hook("session-start", repo, {"hook_event_name": "SessionStart", "cwd": str(repo)})
+                )
+                self.assertIsNotNone(experience_start_context)
+                self.assertNotIn(experience_id, json.dumps(experience_start_context, separators=(",", ":")))
 
                 secret_proposal = _run_launcher(
                     [

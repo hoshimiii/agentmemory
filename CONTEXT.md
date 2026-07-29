@@ -2,53 +2,78 @@
 
 ## Current Brief
 
-This turn's only goal: add a project-scoped, read-only OpenViking knowledge retrieval boundary on top of the accepted M6 AgentMemory trust model.
+This turn's only goal: specify, implement, and verify the P0 private experience-governance layer while preserving the accepted AgentMemory trust boundary.
 
 ### Deliverables
 
-- Derive or require one stable OpenViking project URI for the current Git repository; never search a shared projects root implicitly.
-- Require every knowledge query to carry that exact project URI and return bounded source provenance sufficient to identify the originating URI and local source when OpenViking exposes it.
-- Keep retrieved knowledge untrusted and read-only. It must never create, confirm, promote, or inject an AgentMemory checkpoint/project record without the existing explicit candidate and `review --confirm` path.
-- Keep global `notes` and `debug` collections outside the project retrieval command; no cross-domain fallback.
-- Add focused tests and accurate plugin/CLI documentation without weakening M6 receipt, identity, secret, or byte-budget checks.
+- Produce one self-contained P0 requirements document covering rationale, data contracts, lifecycle, applicability, evidence, dynamic context activation, CLI/storage/render behavior, compatibility, security boundaries, and rollback.
+- Add compact project-scoped `strategy` and `warning` experience records through the existing candidate -> explicit review -> local receipt trust path.
+- Add explicit lifecycle and lineage sufficient to represent `active`, `superseded`, and `deprecated` reviewed experience without automatic promotion or deletion.
+- Add bounded applicability and verification evidence fields that are integrity-protected and fail closed; self-reported scores are not promotion evidence.
+- Add an explicit matcher/renderer for task signals that returns only applicable, locally trusted active experience and grows context according to activated relations instead of one fixed 6000-byte budget.
+- Preserve existing checkpoint, decision, incident, constraint, OpenViking retrieval, branch/worktree isolation, receipt, secret-scan, and hook behavior unless the approved requirements explicitly replace the fixed resume budget.
+- Provide a multi-level checklist and tests mapping each requirement to observable evidence.
 
 ### Non-goals
 
-- No browser-extension changes or browser-memory integration.
-- No OpenViking daemon, vector database, indexing implementation, automatic repository scan, global/workspace memory, MCP/app/UI, cloud sync, or mutation of `E:\OpenVikingKB`.
-- No automatic query at `SessionStart`, no transcript/tool-output access, and no automatic memory promotion.
-- No installation, remote push, deployment, or modification of monitored project files outside this repository.
+- No EvoMap Hub, GDI, credits, public asset import, network sharing, autonomous mutation, live promotion, evaluator self-editing, or background daemon.
+- No Capsule solidification, EvolutionEvent scoring, offline replay engine, shadow routing, automatic signal extraction, transcript/reasoning-trace ingestion, or cross-project experience transfer in P0.
+- No OpenViking writes or use of OpenViking results as promotion evidence.
+- No browser-extension integration, workspace/global memory, MCP/app/UI, installation, remote push, release, or deployment.
 
 ### Settled Contracts
 
-- The exact project root is `viking://resources/projects/repo-<repository_id>`, derived from the existing Git common-directory identity. Human-readable or shared-root URI overrides are not accepted.
-- Add one explicit read-only `retrieve` CLI command. It uses an absolute native OpenViking executable path plus an explicit absolute `ovcli.conf`, invokes subprocesses without a shell, performs `health`, then searches only the derived root with `level=2` and `context_type=resource`.
-- Returned candidates are bounded, marked untrusted, and restricted to strict descendants of the derived root. Any memory/skill/cross-domain result fails the entire operation.
-- Provenance reports the exact OpenViking URI and server `modTime`; local source path, current modification time, and current SHA-256 may be reported only after a safe repo-relative mapping and regular-file validation, explicitly labeled as current local evidence rather than an OpenViking index hash.
-- Retrieval does not call `read`, import AgentMemory storage/render/hooks, require AgentMemory initialization, or create any repository state.
+- Existing candidate review, exact repository/worktree/branch/head checks, content integrity, secret scanning, local receipts, atomic writes, and fail-closed loading remain the sole trust and promotion boundary.
+- `strategy` and `warning` are advisory untrusted context below higher-priority instructions and current repository evidence; they never execute tools or mutate a repository by themselves.
+- A strategy and its warnings remain separate objects. Lineage links are identifiers only and cannot bypass review, receipt, repository identity, applicability, or lifecycle checks.
+- The generator cannot modify evaluator criteria or convert its own claimed success into verified evidence. P0 stores objective command/result metadata only after explicit proposal and review.
+- Dynamic context is relation-driven but not unbounded: explicit task-time matching starts at 8192 bytes, grows by 2048 bytes per activated Strategy-Warning relation, and stops at 24576 bytes. Each compact record is at most 2048 bytes and is included whole.
+- Existing `SessionStart` continuity semantics and its fixed 6000-byte checkpoint capsule remain unchanged. P0 adds explicit task-time experience matching and does not infer tasks in SessionStart.
+- P0 uses strict schema-version dispatch and stores reviewed v2 experiences under `.continuity/shared/experiences/`; the v1 schema, v1 shared records, manifest, `CONTINUITY.md`, hooks, and OpenViking adapter remain unchanged.
 
 ### File and Phase Scope
 
-- Investigation: current CLI, identity/storage/render/hook boundaries, package metadata, tests, and the installed OpenViking CLI contract.
-- Implementation is limited to a new `agentmemory/openviking.py`, the `retrieve` CLI surface, the shared Git identity decoder needed for non-ASCII repositories, focused retrieval tests, the public skill, and accurate README/security/privacy/package descriptions. Do not modify hooks, record schemas, storage layout, receipts, or rendering.
-- Work is isolated on `codex/m7-project-scoped-openviking`, based on M6 commit `8c1d0a95b004a78bb82f3871aea78e84bf2c0fef`.
+- Investigation may inspect schema/storage/render/CLI/hooks, all tests, public docs/skill, and accepted M6/M7 contracts; investigation agents are read-only.
+- Requirements are recorded in one P0 requirements document; current task state remains only in this `CONTEXT.md` Current Brief and Pending List.
+- Approved implementation surfaces are `agentmemory/schema.py`, `agentmemory/storage.py`, `agentmemory/render.py`, `agentmemory/cli.py`, new `schemas/experience-v2.schema.json`, focused tests, and public documentation/skill. `schemas/record-v1.schema.json` may be regression-checked but not changed.
+- Hooks, OpenViking code, manifest contents, and v1 resume rendering are do-not-touch.
+- Work is isolated on `codex/m8-p0-experience-governance`, based on local `main` commit `06ddbcc`.
 
 ### Acceptance
 
-- Existing M6 test suites remain green.
-- New tests prove exact project-URI enforcement, rejection of shared/global/domain-crossing URIs, bounded provenance, read-only failure behavior, and no AgentMemory state writes during retrieval.
-- Missing/unhealthy/malformed OpenViking fails closed without blocking ordinary AgentMemory status/checkpoint/resume behavior.
-- Git identity preserves non-ASCII repository paths so the deterministic URI works in this checkout.
-- `compileall`, Python 3.9 AST parsing, JSON parsing, skill/plugin validation, and `git diff --check` pass.
+- Requirements and multi-level checklist map every P0 behavior, security boundary, compatibility rule, and deferred feature to acceptance evidence.
+- Existing tests remain green; new tests cover both valid flows and malformed, stale, cross-project, missing-receipt, lifecycle, relation-cycle, context-growth, ceiling, and deterministic-order cases.
+- Candidate and review remain the only promotion route; unreviewed, unreceipted, superseded, deprecated, inapplicable, malformed, and cross-project experience never becomes active task context.
+- Dynamic output is deterministic for the same identity, signals, active graph, and safety limit; more activated valid relations may grow output, while cycles and fan-out remain bounded.
+- `py -3 -m unittest discover -s tests -v`, `python -m unittest discover -s tests -v`, compile checks, Python 3.9 parsing when available, JSON/schema validation, skill/plugin validation, and `git diff --check` pass.
 
 ### Stop Conditions
 
-- Stop and return to root if implementation requires an OpenViking server/config mutation, a new automatic hook event, a schema compatibility break, credential access, external publication, or weakening the M6 confirmation boundary.
-- Stop if the project URI cannot be bound to the current Git repository without an unresolved product decision.
+- Stop if a slice requires weakening explicit review, receipt, identity, secret, path, integrity, or fail-closed behavior.
+- Stop if a schema migration would make existing v1 files unreadable, silently reinterpret existing records, or require destructive rewriting without a separately approved migration contract.
+- Stop if implementation requires transcript access, a new automatic hook event, network activity, external publication, installation, deployment, or modification outside this repository.
+- Stop and return architecture decisions to root if relation activation, lifecycle transitions, evidence authority, or dynamic safety limits cannot be implemented within the approved contract.
 
 ## Pending List
 
-- No code blocker remains. External indexing is intentionally operator-owned; the current deterministic project URI is healthy but has no indexed resources, so live retrieval correctly returns an empty result.
+- Current Work: Done.
+- The approved and implemented contract is `docs/P0_EXPERIENCE_GOVERNANCE_REQUIREMENTS.zh-CN.md`; lifecycle changes require a new immutable candidate and explicit review.
+- No architecture, implementation, review, or verification blocker remains.
+- Deferred by contract: Hub, automatic promotion or mutation, Capsule/Event, replay/shadow, transcript-derived signals, OpenViking writes, installation, merge, push, release, and deployment.
+- Exact Next Action: None.
+
+## P0 Acceptance Evidence
+
+- Branch: `codex/m8-p0-experience-governance`, based on local `main` commit `06ddbcc`.
+- Final independent `gpt-5.6-terra xhigh` review reported no P0-P3 findings after verifying projection bounds, receipt gating, lifecycle nonactivation, fan-out, schema parity, and v1/Hook isolation.
+- `py -3 -m unittest discover -s tests -v`: 108 passed, 2 expected Windows `mkfifo` capability skips, 230.417 seconds.
+- `python -m unittest discover -s tests -v`: 108 passed, 2 expected Windows `mkfifo` capability skips, 202.041 seconds.
+- `compileall`, Python 3.9 AST parsing, JSON parsing for plugin/hooks/v1/v2 schemas, Skill validation, Plugin validation, and `git diff --check` passed.
+- `AICR-pass` is not installed, so it was not applicable and did not block completion.
+- Hooks, `.codex-plugin/plugin.json`, `schemas/record-v1.schema.json`, and `agentmemory/openviking.py` are unchanged from `06ddbcc`.
+- OpenViking lookup was healthy with the explicit local config but returned no relevant P0 record; current repository evidence remained authoritative.
+- Requested Spark implementation routing was attempted without `service_tier`, but the launched session was read-only; implementation used bounded Terra agents and a fresh independent Terra reviewer.
+- Remaining risk: no live installation or deployed-host validation was performed because installation, merge, push, release, and deployment are explicit non-goals.
 
 ## M7 Acceptance Evidence
 

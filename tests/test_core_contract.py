@@ -16,6 +16,7 @@ from agentmemory.security import SecretScanError
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schemas" / "record-v1.schema.json"
+EXPERIENCE_SCHEMA_PATH = ROOT / "schemas" / "experience-v2.schema.json"
 
 REPO_ID = "a" * 64
 WORKTREE_ID = "b" * 64
@@ -145,6 +146,49 @@ def _valid_project_record(*, semantic_role: str = "fact") -> dict:
         "confirmed_by": "explicit_user",
         "confirmed_at": _timestamp(),
     }
+    return _seal_record(record)
+
+
+def _valid_experience(*, kind: str = "strategy", reviewed: bool = False) -> dict:
+    record = _base_record_kwargs(
+        "project_record" if reviewed else "candidate",
+        scope="project" if reviewed else "local",
+        kind=kind,
+        status="active" if reviewed else "candidate",
+        semantic_role="inference",
+    )
+    record["schema_version"] = 2
+    record["id"] = f"{'exp' if reviewed else 'cand'}-{kind}"
+    record["content"] = {"body": "Recheck the receipt before resuming the experience."}
+    record["experience"] = {
+        "applicability": {
+            "task_types": ["bugfix"],
+            "signals": ["memory.receipt"],
+            "error_patterns": [],
+        },
+        "evidence": {
+            "checks": [{
+                "command": "py -3 -m unittest discover -s tests -p test_core_contract.py -v",
+                "exit_code": 0,
+                "observed_at": _timestamp(),
+                "git_head": _repo_head_or_fallback(),
+                "result_digest": None,
+            }],
+        },
+        "lineage": {"supersedes": [], "deprecates": []},
+        "relation": {"strategy_id": None},
+    }
+    if reviewed:
+        record["provenance"] = {
+            "source": "explicit-review",
+            "evidence_refs": [],
+            "source_record_id": "cand-strategy",
+        }
+        record["review"] = {
+            "confirmed": True,
+            "confirmed_by": "explicit_user",
+            "confirmed_at": _timestamp(),
+        }
     return _seal_record(record)
 
 
@@ -732,6 +776,106 @@ class TestAgentMemoryCoreContract(unittest.TestCase):
             instruction_constraints["then"]["properties"]["kind"]["const"],
             "constraint",
         )
+
+
+class TestExperienceV2Contract(unittest.TestCase):
+    def test_valid_candidate_and_reviewed_strategy_warning(self) -> None:
+        candidate = _valid_experience()
+        reviewed = _valid_experience(reviewed=True)
+        warning = _valid_experience(kind="warning", reviewed=True)
+        warning["experience"]["relation"]["strategy_id"] = reviewed["id"]
+        warning = schema.annotate_with_integrity(warning)
+        for record in (candidate, reviewed, warning):
+            validated = schema.validate_record(record)
+            self.assertEqual(validated["schema_version"], 2)
+
+    def test_v2_rejects_unknown_fields_and_contract_violations(self) -> None:
+        bad = _valid_experience()
+        bad["experience"]["score"] = 1
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(bad)
+
+        bad = _valid_experience(kind="strategy")
+        bad["experience"]["relation"]["strategy_id"] = "exp-strategy"
+        bad = schema.annotate_with_integrity(bad)
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(bad)
+
+        bad = _valid_experience()
+        bad["experience"]["applicability"]["signals"] = ["memory.receipt", "memory.receipt"]
+        bad = schema.annotate_with_integrity(bad)
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(bad)
+
+        bad = _valid_experience()
+        bad["experience"]["evidence"]["checks"][0]["exit_code"] = True
+        bad = schema.annotate_with_integrity(bad)
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(bad)
+
+        bad = _valid_experience()
+        bad["experience"]["lineage"]["supersedes"] = [bad["id"]]
+        bad = schema.annotate_with_integrity(bad)
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(bad)
+
+        bad = _valid_experience()
+        bad["content"]["body"] = "x" * (schema.MAX_EXPERIENCE_BODY_BYTES + 1)
+        bad = schema.annotate_with_integrity(bad)
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(bad)
+
+    def test_v2_integrity_secret_and_schema_file(self) -> None:
+        record = _valid_experience(reviewed=True)
+        schema.validate_record(record)
+        record["summary"] = "tampered"
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(record)
+
+        secret = _valid_experience()
+        secret["content"] = {"body": "sk-12345678901234567890"}
+        secret = schema.annotate_with_integrity(secret)
+        with self.assertRaises(SecretScanError):
+            schema.validate_record(secret)
+
+        loaded = json.loads(EXPERIENCE_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.assertFalse(loaded["additionalProperties"])
+        self.assertEqual(loaded["properties"]["schema_version"]["const"], 2)
+        self.assertEqual(loaded["properties"]["kind"]["enum"], ["strategy", "warning"])
+        self.assertEqual(loaded["properties"]["experience"]["properties"]["evidence"]["properties"]["checks"]["maxItems"], 4)
+        self.assertEqual(loaded["properties"]["integrity"]["properties"]["version"]["const"], 1)
+
+    def test_v2_preflight_uses_final_review_projection_and_integrity_v1(self) -> None:
+        strategy = _valid_experience()
+        candidate_direct = {
+            "id": strategy["id"], "kind": "strategy", "summary": strategy["summary"], "body": "",
+            "activation": "direct", "related_from": None,
+        }
+        strategy["content"]["body"] = "x" * (
+            schema.MAX_EXPERIENCE_PROJECTION_BYTES - len(schema.canonical_json_dumps(candidate_direct).encode("utf-8"))
+        )
+        self.assertLessEqual(len(schema.canonical_json_dumps({**candidate_direct, "body": strategy["content"]["body"]}).encode("utf-8")), schema.MAX_EXPERIENCE_PROJECTION_BYTES)
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(schema.annotate_with_integrity(strategy))
+
+        standalone = _valid_experience(kind="warning")
+        final_direct = {
+            "id": "f" * 64, "kind": "warning", "summary": standalone["summary"], "body": "",
+            "activation": "direct", "related_from": None,
+        }
+        standalone["content"]["body"] = "x" * (
+            schema.MAX_EXPERIENCE_PROJECTION_BYTES - len(schema.canonical_json_dumps(final_direct).encode("utf-8"))
+        )
+        schema.validate_record(schema.annotate_with_integrity(standalone))
+
+        related = _valid_experience(kind="warning")
+        related["content"]["body"] = standalone["content"]["body"]
+        related["experience"]["relation"]["strategy_id"] = "f" * 64
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(schema.annotate_with_integrity(related))
+
+        with self.assertRaises(schema.RecordValidationError):
+            schema.validate_record(schema.annotate_with_integrity(_valid_experience(), version=2))
 
 
 if __name__ == "__main__":

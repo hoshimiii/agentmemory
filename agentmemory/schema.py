@@ -1,4 +1,4 @@
-"""Strict v1 record contract validation and integrity helpers."""
+"""Strict v1 and v2 experience contract validation and integrity helpers."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .security import scan_for_secrets
 
 
 SCHEMA_VERSION = 1
+EXPERIENCE_SCHEMA_VERSION = 2
 
 RECORD_TYPE_CHECKPOINT = "checkpoint"
 RECORD_TYPE_CANDIDATE = "candidate"
@@ -56,6 +57,7 @@ TOP_LEVEL_FIELDS = {
     "created_at",
     "integrity",
 }
+EXPERIENCE_TOP_LEVEL_FIELDS = TOP_LEVEL_FIELDS | {"experience"}
 
 APPLIES_FIELDS = {
     "repository_id",
@@ -68,6 +70,12 @@ APPLIES_FIELDS = {
 PROVENANCE_FIELDS = {"source", "evidence_refs", "source_record_id"}
 REVIEW_FIELDS = {"confirmed", "confirmed_by", "confirmed_at"}
 INTEGRITY_FIELDS = {"version", "content_hash"}
+EXPERIENCE_FIELDS = {"applicability", "evidence", "lineage", "relation"}
+APPLICABILITY_FIELDS = {"task_types", "signals", "error_patterns"}
+EVIDENCE_FIELDS = {"checks"}
+EVIDENCE_CHECK_FIELDS = {"command", "exit_code", "observed_at", "git_head", "result_digest"}
+LINEAGE_FIELDS = {"supersedes", "deprecates"}
+RELATION_FIELDS = {"strategy_id"}
 
 MAX_SUMMARY_CHARS = 1024
 MAX_CONTENT_BYTES = 16 * 1024
@@ -80,6 +88,13 @@ MAX_EVIDENCE_REF_LENGTH = 256
 MAX_EVIDENCE_REFS = 32
 MAX_SOURCE_RECORD_ID_LENGTH = 64
 MAX_TIMESTAMP_LENGTH = 64
+MAX_EXPERIENCE_BODY_BYTES = 2048
+MAX_EXPERIENCE_PROJECTION_BYTES = 2048
+MAX_APPLICABILITY_VALUES = 8
+MAX_APPLICABILITY_TAG_LENGTH = 64
+MAX_EVIDENCE_CHECKS = 4
+MAX_EVIDENCE_COMMAND_LENGTH = 256
+MAX_LINEAGE_REFERENCES = 4
 
 RUNTIME_VALIDATION_REQUIRED = [
     "canonical-json-shape",
@@ -98,6 +113,7 @@ ISO_TZ_RE = re.compile(
 )
 HEAD_SHA_RE = re.compile(r"^(?:[a-f0-9]{40}|UNBORN)$")
 HEAD_SHA_ONLY_RE = re.compile(r"^[a-f0-9]{40}$")
+EXPERIENCE_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SCHEMA_BRANCH_PATTERN = (
     r"^(?!DETACHED$)(?![./-])(?!.*/\.)(?!.*[./]$)(?!.*//)"
     r"(?!\.{1,2}(?:/|$))(?!.*/\.{1,2}(?:/|$))"
@@ -403,7 +419,7 @@ def _validate_record_id(record_id: Any) -> str:
     return value
 
 
-def validate_record(record: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_v1_record(record: Mapping[str, Any]) -> dict[str, Any]:
     """Validate all v1 contract rules and integrity."""
 
     _validate_json_shape(record)
@@ -511,3 +527,141 @@ def validate_record(record: Mapping[str, Any]) -> dict[str, Any]:
         _fail("integrity.content_hash mismatch")
 
     return record_obj
+
+
+def _validate_experience_tags(value: Any, context: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > MAX_APPLICABILITY_VALUES:
+        _fail(f"{context} must be a bounded list")
+    for tag in value:
+        if not isinstance(tag, str) or not EXPERIENCE_TAG_RE.fullmatch(tag):
+            _fail(f"{context} entries must be canonical tags")
+    if len(set(value)) != len(value):
+        _fail(f"{context} must not contain duplicates")
+    return value
+
+
+def _validate_experience(record_obj: dict[str, Any]) -> dict[str, Any]:
+    experience = _require_fields(record_obj["experience"], EXPERIENCE_FIELDS, "experience")
+    applicability = _require_fields(experience["applicability"], APPLICABILITY_FIELDS, "experience.applicability")
+    for field in APPLICABILITY_FIELDS:
+        applicability[field] = _validate_experience_tags(applicability[field], f"experience.applicability.{field}")
+    if not any(applicability.values()):
+        _fail("experience.applicability must not be unconditional")
+
+    evidence = _require_fields(experience["evidence"], EVIDENCE_FIELDS, "experience.evidence")
+    checks = evidence["checks"]
+    if not isinstance(checks, list) or len(checks) > MAX_EVIDENCE_CHECKS:
+        _fail("experience.evidence.checks must be a bounded list")
+    for index, check in enumerate(checks):
+        check = _require_fields(check, EVIDENCE_CHECK_FIELDS, f"experience.evidence.checks[{index}]")
+        command = _require_str(check["command"], f"experience.evidence.checks[{index}].command")
+        if len(command) > MAX_EVIDENCE_COMMAND_LENGTH:
+            _fail("experience evidence command must be bounded")
+        exit_code = check["exit_code"]
+        if type(exit_code) is not int or not 0 <= exit_code <= 255:
+            _fail("experience evidence exit_code must be an integer from 0 through 255")
+        _validate_timestamp(check["observed_at"], f"experience.evidence.checks[{index}].observed_at")
+        _validate_head(check["git_head"])
+        digest = check["result_digest"]
+        if digest is not None and (not isinstance(digest, str) or not SHA256_RE.fullmatch(digest)):
+            _fail("experience evidence result_digest must be null or sha256 hex digest")
+
+    lineage = _require_fields(experience["lineage"], LINEAGE_FIELDS, "experience.lineage")
+    references: dict[str, list[str]] = {}
+    for field in LINEAGE_FIELDS:
+        values = lineage[field]
+        if not isinstance(values, list) or len(values) > MAX_LINEAGE_REFERENCES:
+            _fail(f"experience.lineage.{field} must be a bounded list")
+        for value in values:
+            if not isinstance(value, str) or not RECORD_ID_RE.fullmatch(value):
+                _fail(f"experience.lineage.{field} entries must be record ids")
+            if value == record_obj["id"]:
+                _fail("experience lineage must not reference itself")
+        if len(set(values)) != len(values):
+            _fail(f"experience.lineage.{field} must not contain duplicates")
+        references[field] = values
+    if set(references["supersedes"]) & set(references["deprecates"]):
+        _fail("experience lineage references must not overlap")
+
+    relation = _require_fields(experience["relation"], RELATION_FIELDS, "experience.relation")
+    strategy_id = relation["strategy_id"]
+    if strategy_id is not None and (not isinstance(strategy_id, str) or not RECORD_ID_RE.fullmatch(strategy_id)):
+        _fail("experience.relation.strategy_id must be null or a record id")
+    if strategy_id == record_obj["id"]:
+        _fail("experience relation must not reference itself")
+
+    content = _require_fields(record_obj["content"], {"body"}, "content")
+    body = _require_str(content["body"], "content.body")
+    if len(body.encode("utf-8")) > MAX_EXPERIENCE_BODY_BYTES:
+        _fail("content.body must be size bounded")
+    # Reviewed v2 records receive a 64-character project id.  Preflight that
+    # final projection, not the shorter local candidate representation.
+    related_warning = record_obj["kind"] == "warning" and strategy_id is not None
+    compact = {
+        "id": "f" * 64, "kind": record_obj["kind"], "summary": record_obj["summary"],
+        "body": body,
+        "activation": "related" if related_warning else "direct",
+        "related_from": "f" * 64 if related_warning else None,
+    }
+    if len(canonical_json_dumps(compact).encode("utf-8")) > MAX_EXPERIENCE_PROJECTION_BYTES:
+        _fail("experience compact projection must be size bounded")
+    return experience
+
+
+def validate_experience_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an immutable schema-v2 strategy or warning experience."""
+
+    _validate_json_shape(record)
+    record_obj = _require_fields(copy.deepcopy(record), EXPERIENCE_TOP_LEVEL_FIELDS, "record")
+    if type(record_obj.get("schema_version")) is not int or record_obj["schema_version"] != EXPERIENCE_SCHEMA_VERSION:
+        _fail("unknown schema_version")
+    record_obj["id"] = _validate_record_id(record_obj["id"])
+    record_type = _require_str(record_obj["record_type"], "record_type")
+    kind = _require_str(record_obj["kind"], "kind")
+    status = _require_str(record_obj["status"], "status")
+    semantic_role = _require_str(record_obj["semantic_role"], "semantic_role")
+    scope = _require_str(record_obj["scope"], "scope")
+    if record_type not in (RECORD_TYPE_CANDIDATE, RECORD_TYPE_PROJECT) or kind not in ("strategy", "warning"):
+        _fail("v2 record_type or kind has invalid value")
+    if semantic_role not in (SEMANTIC_FACT, SEMANTIC_INFERENCE):
+        _fail("v2 experience prohibits instruction role")
+    summary = _require_str(record_obj["summary"], "summary")
+    if len(summary) > MAX_SUMMARY_CHARS:
+        _fail("summary must be bounded")
+    record_obj["applies_to"] = _validate_applies_to(record_obj["applies_to"])
+    record_obj["provenance"] = _validate_provenance(record_obj["provenance"])
+    record_obj["review"] = _validate_review(record_obj["review"])
+    record_obj["created_at"] = _validate_timestamp(record_obj["created_at"], "created_at")
+    record_obj["integrity"] = _validate_integrity(record_obj["integrity"])
+    if record_obj["integrity"]["version"] != 1:
+        _fail("v2 experience integrity.version must be 1")
+    record_obj["experience"] = _validate_experience(record_obj)
+    if kind == "strategy" and record_obj["experience"]["relation"]["strategy_id"] is not None:
+        _fail("strategy relation.strategy_id must be null")
+    if record_type == RECORD_TYPE_CANDIDATE:
+        if status != STATUS_CANDIDATE or scope != SCOPE_LOCAL or record_obj["review"]["confirmed"]:
+            _fail("v2 candidate requires candidate/local/unconfirmed")
+    else:
+        if status != STATUS_ACTIVE or scope != SCOPE_PROJECT or not record_obj["review"]["confirmed"]:
+            _fail("v2 project_record requires active/project/confirmed")
+        if record_obj["review"]["confirmed_by"] != "explicit_user" or record_obj["provenance"]["source"] != "explicit-review":
+            _fail("v2 project_record requires explicit review")
+    scan_payload = copy.deepcopy(record_obj)
+    scan_payload["integrity"].pop("content_hash", None)
+    scan_for_secrets(scan_payload)
+    if record_obj["integrity"]["content_hash"] != compute_record_integrity(record_obj):
+        _fail("integrity.content_hash mismatch")
+    return record_obj
+
+
+def validate_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Dispatch strict validation by schema version without reinterpreting v1."""
+
+    _validate_json_shape(record)
+    if not isinstance(record, Mapping) or type(record.get("schema_version")) is not int:
+        _fail("schema_version must be an integer")
+    if record["schema_version"] == SCHEMA_VERSION:
+        return _validate_v1_record(record)
+    if record["schema_version"] == EXPERIENCE_SCHEMA_VERSION:
+        return validate_experience_record(record)
+    _fail("unknown schema_version")

@@ -6,9 +6,10 @@ AgentMemory stores only content supplied through explicit CLI operations:
 
 - ignored per-worktree checkpoints and candidates under `.continuity/local/`;
 - explicitly reviewed project records under `.continuity/shared/records/`;
+- explicitly reviewed v2 strategy/warning experiences under `.continuity/shared/experiences/` and their local receipts;
 - a deterministic tracked `.continuity/CONTINUITY.md` rendering.
 
-It does not collect full chats, transcripts, tool output, process telemetry, `PLUGIN_DATA`, or unrelated repository files. `SessionStart` reads validated checkpoint and confirmed project-record files only.
+It does not collect full chats, transcripts, logs, stdout/stderr, reasoning traces, tool output, process telemetry, `PLUGIN_DATA`, or unrelated repository files. Evidence stores only supplied command text, exit code, timestamp, Git head, and an optional digest; it does not execute commands or retain their output. `SessionStart` reads validated checkpoint and confirmed v1 project-record files only; explicit experience matching reads receipt-gated v2 sidecars only.
 
 ## Data movement
 
@@ -16,9 +17,9 @@ The plugin contains no socket or telemetry client and performs no synchronizatio
 
 ## Retention and deletion
 
-- Ignored checkpoints and candidates remain until the user removes the relevant `.continuity/local/` data.
-- Reviewed project records and `CONTINUITY.md` may remain in the working tree and Git history. Deleting a working-tree file does not erase existing commits or remote copies.
-- Disabling, uninstalling, or rolling back AgentMemory leaves all project data intact by default.
+- Ignored checkpoints, candidates, and receipts remain until the user removes the relevant `.continuity/local/` data.
+- Reviewed project records, reviewed experience sidecars, and `CONTINUITY.md` may remain in the working tree and Git history. Deleting a working-tree file does not erase existing commits or remote copies.
+- Disabling, uninstalling, or rolling back AgentMemory leaves all project data, including v2 sidecars and receipts, intact by default.
 - Purging data is a separate destructive operation: back it up, inspect the exact repository path, and obtain explicit user approval before removal.
 
 ## Sensitive data

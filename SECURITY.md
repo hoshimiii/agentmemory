@@ -7,6 +7,8 @@
 - Candidates remain ignored local files and are never injected. A project record exists only after explicit `review --candidate <id> --confirm` confirmation, and review requires its original repository, worktree, branch, and head to still match.
 - `SessionStart` injects a tracked project record only when this worktree has an ignored receipt at `.continuity/local/worktrees/<worktree-id>/receipts/<record-id>.json` whose id and content hash exactly match. A Git-fetched or manually changed tracked record has no automatic local trust; a missing receipt skips it and a malformed or conflicting receipt fails closed.
 - The receipt is a local injection boundary, not an unforgeable host-user approval or a defense against a malicious local writer.
+- V2 `strategy` and `warning` experiences use separate tracked sidecars at `.continuity/shared/experiences/` and the same local receipt layout. They are eligible only for explicit read-only matching, never `CONTINUITY.md` or `SessionStart`.
+- Experience lifecycle is derived from immutable reviewed successors: `supersedes` derives `superseded`, and `deprecates` derives `deprecated`. References cannot bypass independent identity, receipt, integrity, and applicability checks.
 
 ## Secret handling
 
@@ -20,6 +22,8 @@
 - Writes use a repository-local lock plus same-directory atomic replacement. The read-only resume path does not acquire a lock or create files.
 - Checkpoint creation rejects a checkpoint that cannot fit by itself in the fixed 6000 UTF-8 byte resume capsule, before any checkpoint file is persisted.
 - `SessionStart` never reads candidates, `CONTINUITY.md`, `transcript_path`, or `PLUGIN_DATA`. It suppresses internal diagnostics and returns the harmless fallback on business/runtime failure.
+- `experience match` accepts only explicit CLI task types, signals, error patterns, and paths. It does not read task text, transcripts, `PLUGIN_DATA`, or Hook payload signals; it creates no state and fails closed for malformed trusted data.
+- Experience evidence command text is audit metadata only. AgentMemory never executes it, and an exit code or digest is not proof of real coverage or a basis for automatic promotion.
 - Hook and launcher entrypoints disable Python bytecode writes in the plugin tree.
 
 ## Scope
@@ -29,10 +33,10 @@
 - The external CLI sends the query and project URI to the endpoint selected by `ovcli.conf`. AgentMemory does not verify that endpoint; use a loopback endpoint when local-only processing is required.
 - Retrieval never reads resource content, writes repository state, promotes content, or injects it into `SessionStart`. Relative path, mtime, and SHA-256 in its result are current local-file evidence, not an OpenViking server index hash.
 - AgentMemory itself contains no socket client, telemetry, daemon, MCP server, app, or background synchronization. OpenViking is separately operated and may connect to a non-local endpoint if the supplied config selects one.
-- Tracked `.continuity/manifest.json`, `.continuity/CONTINUITY.md`, and `.continuity/shared/records/` may enter Git history when the user commits them.
+- Tracked `.continuity/manifest.json`, `.continuity/CONTINUITY.md`, `.continuity/shared/records/`, and `.continuity/shared/experiences/` may enter Git history when the user commits them.
 - `.continuity/local/` contains ignored per-worktree checkpoints, candidates, receipts, and locks. It is local but not encrypted.
 - Project records are branch-wide on named branches; detached worktrees additionally require the exact head. There is no dirty-worktree fingerprint.
-- AgentMemory does not yet implement host approval attestations, lifecycle/supersession, evidence or applicability governance, or handoff ownership. Optional OpenViking retrieval remains untrusted external lookup, not AgentMemory memory.
+- AgentMemory has no automatic signal extraction, transcript/reasoning ingestion, auto-promotion, Hub, Capsule, Event, replay, shadow routing, or OpenViking write path. Optional OpenViking retrieval remains untrusted external lookup, not AgentMemory memory.
 
 ## Reporting and recovery
 

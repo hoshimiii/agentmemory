@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AgentMemory experience v2",
+  "type": "object",
+  "additionalProperties": false,
+  "x-agentmemory-runtime-validation-required": [
+    "canonical-json-shape", "canonical-json-utf8", "content-utf8-byte-limit",
+    "timestamp-semantic-parse", "integrity_content_hash_verification", "secret_scan",
+    "experience-compact-projection-byte-limit"
+  ],
+  "required": ["schema_version", "id", "record_type", "kind", "status", "semantic_role", "summary", "scope", "applies_to", "provenance", "content", "experience", "review", "created_at", "integrity"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "maxLength": 64},
+    "record_type": {"enum": ["candidate", "project_record"]},
+    "kind": {"enum": ["strategy", "warning"]},
+    "status": {"enum": ["candidate", "active"]},
+    "semantic_role": {"enum": ["fact", "inference"]},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "scope": {"enum": ["local", "project"]},
+    "applies_to": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_id", "worktree_id", "branch", "head", "paths"],
+      "properties": {
+        "repository_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "worktree_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "branch": {"oneOf": [{"const": "DETACHED"}, {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^(?!DETACHED$)(?![./-])(?!.*/\\.)(?!.*[./]$)(?!.*//)(?!\\.{1,2}(?:/|$))(?!.*/\\.{1,2}(?:/|$))(?![^/]*\\.lock(?:/|$))(?!.*/[^/]*\\.lock(?:/|$))(?!.*\\.\\.)(?!.*@\\{)(?!.*[\\x00-\\x20\\x7f~^:?*\\[\\\\]).+$"}]},
+        "head": {"oneOf": [{"const": "UNBORN"}, {"type": "string", "pattern": "^[a-f0-9]{40}$", "maxLength": 40}]},
+        "paths": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^(?!\\s)(?![^/]*:)(?!/)(?!.*\\\\)(?!.*//)(?!.*\\x00)(?!\\.{1,2}(?:/|$))(?!.*/\\.{1,2}(?:/|$))(?!.*[/]$)(?!.*\\s$).+$"}}
+      }
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "evidence_refs", "source_record_id"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1, "maxLength": 256},
+        "evidence_refs": {"type": "array", "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+        "source_record_id": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "content": {
+      "type": "object", "additionalProperties": false, "required": ["body"],
+      "properties": {"body": {"type": "string"}}
+    },
+    "experience": {
+      "type": "object", "additionalProperties": false,
+      "required": ["applicability", "evidence", "lineage", "relation"],
+      "properties": {
+        "applicability": {
+          "type": "object", "additionalProperties": false,
+          "required": ["task_types", "signals", "error_patterns"],
+          "properties": {
+            "task_types": {"$ref": "#/$defs/tags"}, "signals": {"$ref": "#/$defs/tags"}, "error_patterns": {"$ref": "#/$defs/tags"}
+          },
+          "anyOf": [
+            {"properties": {"task_types": {"minItems": 1}}},
+            {"properties": {"signals": {"minItems": 1}}},
+            {"properties": {"error_patterns": {"minItems": 1}}}
+          ]
+        },
+        "evidence": {
+          "type": "object", "additionalProperties": false, "required": ["checks"],
+          "properties": {"checks": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/check"}}}
+        },
+        "lineage": {
+          "type": "object", "additionalProperties": false, "required": ["supersedes", "deprecates"],
+          "properties": {"supersedes": {"$ref": "#/$defs/lineage"}, "deprecates": {"$ref": "#/$defs/lineage"}}
+        },
+        "relation": {
+          "type": "object", "additionalProperties": false, "required": ["strategy_id"],
+          "properties": {"strategy_id": {"type": ["null", "string"], "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "maxLength": 64}}
+        }
+      }
+    },
+    "review": {
+      "type": "object", "additionalProperties": false, "required": ["confirmed", "confirmed_by", "confirmed_at"],
+      "properties": {"confirmed": {"type": "boolean"}, "confirmed_by": {"type": ["null", "string"]}, "confirmed_at": {"type": ["null", "string"], "format": "date-time", "maxLength": 64}}
+    },
+    "created_at": {"type": "string", "format": "date-time", "maxLength": 64},
+    "integrity": {
+      "type": "object", "additionalProperties": false, "required": ["version", "content_hash"],
+      "properties": {"version": {"const": 1}, "content_hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}
+    }
+  },
+  "$defs": {
+    "tags": {"type": "array", "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "maxLength": 64}},
+    "lineage": {"type": "array", "maxItems": 4, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$", "maxLength": 64}},
+    "check": {"type": "object", "additionalProperties": false, "required": ["command", "exit_code", "observed_at", "git_head", "result_digest"], "properties": {"command": {"type": "string", "minLength": 1, "maxLength": 256}, "exit_code": {"type": "integer", "minimum": 0, "maximum": 255}, "observed_at": {"type": "string", "format": "date-time", "maxLength": 64}, "git_head": {"oneOf": [{"const": "UNBORN"}, {"type": "string", "pattern": "^[a-f0-9]{40}$"}]}, "result_digest": {"type": ["null", "string"], "pattern": "^sha256:[a-f0-9]{64}$"}}}
+  },
+  "allOf": [
+    {"if": {"properties": {"record_type": {"const": "candidate"}}}, "then": {"properties": {"status": {"const": "candidate"}, "scope": {"const": "local"}, "review": {"properties": {"confirmed": {"const": false}, "confirmed_by": {"type": "null"}, "confirmed_at": {"type": "null"}}}}}},
+    {"if": {"properties": {"record_type": {"const": "project_record"}}}, "then": {"properties": {"status": {"const": "active"}, "scope": {"const": "project"}, "provenance": {"properties": {"source": {"const": "explicit-review"}}}, "review": {"properties": {"confirmed": {"const": true}, "confirmed_by": {"const": "explicit_user"}, "confirmed_at": {"type": "string"}}}}}},
+    {"if": {"properties": {"kind": {"const": "strategy"}}}, "then": {"properties": {"experience": {"properties": {"relation": {"properties": {"strategy_id": {"type": "null"}}}}}}}}
+  ]
+}

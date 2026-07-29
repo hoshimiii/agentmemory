@@ -19,7 +19,9 @@ from .storage import (
     render_continuity,
     get_status,
     initialize_repository,
+    load_trusted_experiences,
 )
+from .render import render_experience_match
 
 
 def _parse_content_json(raw: str) -> dict:
@@ -33,6 +35,13 @@ def _parse_content_json(raw: str) -> dict:
     if not isinstance(loaded, dict):
         raise ValueError("invalid content-json")
     return loaded
+
+
+def _parse_experience_json(raw: str) -> dict:
+    try:
+        return _parse_content_json(raw)
+    except ValueError as exc:
+        raise ValueError("invalid experience-json") from exc
 
 
 def _print_json(payload: Any) -> None:
@@ -78,7 +87,7 @@ def _build_parser() -> argparse.ArgumentParser:
     candidate_command = candidate.add_subparsers(dest="candidate_command", required=True)
 
     propose = candidate_command.add_parser("propose")
-    propose.add_argument("--kind", required=True, choices=["decision", "incident", "constraint"])
+    propose.add_argument("--kind", required=True, choices=["decision", "incident", "constraint", "strategy", "warning"])
     propose.add_argument("--summary", required=True)
     propose.add_argument("--content-json", dest="content_json", required=True)
     propose.add_argument(
@@ -89,12 +98,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     propose.add_argument("--path", action="append", default=[])
     propose.add_argument("--id")
+    propose.add_argument("--experience-json", dest="experience_json")
 
     review = command.add_parser("review")
     review.add_argument("--candidate", dest="candidate_id", required=True)
     review.add_argument("--confirm", action="store_true", required=True)
 
     command.add_parser("render")
+
+    experience = command.add_parser("experience")
+    experience_command = experience.add_subparsers(dest="experience_command", required=True)
+    match = experience_command.add_parser("match")
+    match.add_argument("--task-type", action="append", default=[])
+    match.add_argument("--signal", action="append", default=[])
+    match.add_argument("--error-pattern", action="append", default=[])
+    match.add_argument("--path", action="append", default=[])
+    match.add_argument("--max-bytes", type=int)
 
     retrieve = command.add_parser("retrieve")
     retrieve.add_argument("--query", required=True)
@@ -151,6 +170,20 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 except ValueError:
                     _emit_error("error: invalid content-json")
                     return 2
+                if args.kind in ("strategy", "warning"):
+                    if args.experience_json is None:
+                        _emit_error("error: invalid experience-json")
+                        return 2
+                    try:
+                        experience = _parse_experience_json(args.experience_json)
+                    except ValueError:
+                        _emit_error("error: invalid experience-json")
+                        return 2
+                elif args.experience_json is not None:
+                    _emit_error("error: invalid arguments")
+                    return 2
+                else:
+                    experience = None
                 payload = create_candidate(
                     args.repo,
                     kind=args.kind,
@@ -159,6 +192,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     paths=args.path,
                     semantic_role=args.semantic_role,
                     record_id=args.id,
+                    experience=experience,
                 )
                 payload["created"] = bool(payload.get("created", True))
                 _print_json(payload)
@@ -175,6 +209,19 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "render":
             payload = render_continuity(args.repo)
             _print_json(payload)
+            return 0
+
+        if args.command == "experience":
+            if args.experience_command != "match":
+                _emit_error("error: invalid arguments")
+                return 2
+            payload = render_experience_match(
+                load_trusted_experiences(args.repo), task_types=args.task_type, signals=args.signal,
+                error_patterns=args.error_pattern, paths=args.path, max_bytes=args.max_bytes,
+            )
+            if payload is None:
+                raise StorageError("experience rendering failed")
+            sys.stdout.write(payload)
             return 0
 
         if args.command == "retrieve":

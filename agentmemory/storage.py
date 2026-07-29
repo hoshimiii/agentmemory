@@ -127,7 +127,8 @@ def _compatible_continuity(path: Path) -> bool:
 
 
 def _compute_project_record_id(candidate: Dict[str, Any]) -> str:
-    payload = b"agentmemory/project-record/v1\0" + candidate["integrity"]["content_hash"].encode("ascii")
+    namespace = b"agentmemory/project-record/v2\0" if candidate["schema_version"] == 2 else b"agentmemory/project-record/v1\0"
+    payload = namespace + candidate["integrity"]["content_hash"].encode("ascii")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -182,6 +183,7 @@ def _resolve_layout(identity: Dict[str, str]) -> Dict[str, Path]:
         "receipt_dir": worktree_local / "receipts",
         "shared_records": continuity / "shared" / "records",
         "project_records": continuity / "shared" / "records",
+        "shared_experiences": continuity / "shared" / "experiences",
         "lock": local / "locks" / "write.lock",
         "checkpoint_dir": checkpoints,
     }
@@ -240,6 +242,7 @@ def _validate_path_set(layout: Dict[str, Path], repo_root: Path) -> None:
     _validate_within_root(repo_root, layout["continuity_md"], target_is_file=True)
     _validate_within_root(repo_root, repo_root / ".gitignore", target_is_file=True)
     _validate_within_root(repo_root, layout["shared_records"], target_is_file=False)
+    _validate_within_root(repo_root, layout["shared_experiences"], target_is_file=False)
     _validate_within_root(repo_root, layout["candidate_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["receipt_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["checkpoint_dir"], target_is_file=False)
@@ -377,6 +380,23 @@ def _build_candidate_record(
     return validate_record(record)
 
 
+def _build_experience_candidate_record(
+    identity: Dict[str, str], *, candidate_id: str, kind: str, semantic_role: str,
+    summary: str, content: Dict[str, Any], paths: List[str], experience: Dict[str, Any],
+) -> Dict[str, Any]:
+    record = {
+        "schema_version": 2, "id": candidate_id, "record_type": "candidate", "kind": kind,
+        "status": "candidate", "semantic_role": semantic_role, "summary": summary, "scope": "local",
+        "applies_to": {"repository_id": identity["repository_id"], "worktree_id": identity["worktree_id"],
+                       "branch": identity["branch"], "head": identity["head"], "paths": list(paths)},
+        "provenance": {"source": "cli", "evidence_refs": [], "source_record_id": candidate_id},
+        "content": content, "experience": experience,
+        "review": {"confirmed": False, "confirmed_by": None, "confirmed_at": None},
+        "created_at": _timestamp_utc(),
+    }
+    return validate_record(annotate_with_integrity(record, version=1))
+
+
 def _build_project_record(
     *,
     candidate: Dict[str, Any],
@@ -407,6 +427,18 @@ def _build_project_record(
         "created_at": timestamp,
     }
     return annotate_with_integrity(record, version=1)
+
+
+def _build_experience_project_record(*, candidate: Dict[str, Any], project_id: str, timestamp: str) -> Dict[str, Any]:
+    record = dict(candidate)
+    record.update({
+        "id": project_id, "record_type": "project_record", "status": "active", "scope": "project",
+        "provenance": {"source": "explicit-review", "evidence_refs": list(candidate["provenance"]["evidence_refs"]),
+                       "source_record_id": candidate["id"]},
+        "review": {"confirmed": True, "confirmed_by": "explicit_user", "confirmed_at": timestamp},
+        "created_at": timestamp,
+    })
+    return validate_record(annotate_with_integrity(record, version=1))
 
 
 def _project_record_signature(record: Dict[str, Any]) -> str:
@@ -501,8 +533,141 @@ def _iter_project_records(repo_root: Path, shared_records: Path) -> List[Dict[st
             raise StorageError("malformed shared project record") from exc
         if validated["id"] != path.stem:
             raise StorageError("shared record filename mismatch")
+        if validated["schema_version"] != 1:
+            raise StorageError("v2 experience is not a v1 shared record")
         records.append(validated)
     return records
+
+
+def _read_experience_record(path: Path) -> Dict[str, Any]:
+    record = _validate_record_file(path, label="experience")
+    if record["schema_version"] != 2 or record["record_type"] != "project_record":
+        raise StorageError("experience record type mismatch")
+    return record
+
+
+def _iter_experience_records(repo_root: Path, directory: Path) -> List[Dict[str, Any]]:
+    if not directory.exists():
+        return []
+    records: List[Dict[str, Any]] = []
+    for path in sorted(directory.iterdir(), key=lambda item: item.name):
+        _validate_within_root(repo_root, path, target_is_file=True)
+        info = _lstat(path)
+        if info is None:
+            continue
+        mode = stat.S_IFMT(info.st_mode)
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode) or path.suffix != ".json":
+            raise StorageError("experience sidecar contains invalid entry")
+        try:
+            record = _read_experience_record(path)
+        except (RecordValidationError, StorageError) as exc:
+            raise StorageError("malformed experience sidecar") from exc
+        if record["id"] != path.stem:
+            raise StorageError("experience filename mismatch")
+        records.append(record)
+    return records
+
+
+def _experience_visible(record: Dict[str, Any], identity: Dict[str, str]) -> bool:
+    applies = record["applies_to"]
+    if applies["repository_id"] != identity["repository_id"]:
+        raise StorageError("experience repository mismatch")
+    if identity["branch"] == "DETACHED":
+        return applies["branch"] == "DETACHED" and applies["head"] == identity["head"]
+    return applies["branch"] == identity["branch"]
+
+
+def _validate_experience_graph(records: List[Dict[str, Any]]) -> None:
+    ids = {record["id"] for record in records}
+    graph: Dict[str, List[str]] = {record["id"]: [] for record in records}
+    for record in records:
+        experience = record["experience"]
+        refs = [*experience["lineage"]["supersedes"], *experience["lineage"]["deprecates"]]
+        strategy_id = experience["relation"]["strategy_id"]
+        if strategy_id is not None:
+            refs.append(strategy_id)
+        if any(reference not in ids for reference in refs):
+            raise StorageError("experience graph references an unknown record")
+        graph[record["id"]].extend(refs)
+    visiting, visited = set(), set()
+    def visit(record_id: str) -> None:
+        if record_id in visiting:
+            raise StorageError("experience graph contains a cycle")
+        if record_id not in visited:
+            visiting.add(record_id)
+            for target in graph[record_id]:
+                visit(target)
+            visiting.remove(record_id)
+            visited.add(record_id)
+    for record_id in sorted(graph):
+        visit(record_id)
+
+
+def _experience_lifecycle(records: List[Dict[str, Any]]) -> Dict[str, str]:
+    _validate_experience_graph(records)
+    state = {record["id"]: "active" for record in records}
+    for record in records:
+        for target in record["experience"]["lineage"]["supersedes"]:
+            state[target] = "superseded"
+    for record in records:
+        for target in record["experience"]["lineage"]["deprecates"]:
+            state[target] = "deprecated"
+    return state
+
+
+def _load_trusted_experiences(identity: Dict[str, str], directory: Path, receipt_dir: Path, repo_root: Path) -> List[Dict[str, Any]]:
+    records = _iter_experience_records(repo_root, directory)
+    for record in records:
+        if record["created_at"] != record["review"]["confirmed_at"]:
+            raise StorageError("experience confirmation timestamp mismatch")
+    records = [record for record in records if _experience_visible(record, identity)]
+    receipts = _iter_review_receipts(repo_root, receipt_dir, identity)
+    trusted: List[Dict[str, Any]] = []
+    for record in records:
+        receipt = receipts.get(record["id"])
+        if receipt is None:
+            continue
+        if receipt["content_hash"] != record["integrity"]["content_hash"]:
+            raise StorageError("conflicting experience review receipt")
+        trusted.append(record)
+    # References to a missing receipt are not trusted targets and fail review/load closed.
+    trusted_ids = {record["id"] for record in trusted}
+    for record in trusted:
+        refs = [*record["experience"]["lineage"]["supersedes"], *record["experience"]["lineage"]["deprecates"]]
+        strategy_id = record["experience"]["relation"]["strategy_id"]
+        if strategy_id is not None:
+            refs.append(strategy_id)
+        if any(reference not in trusted_ids for reference in refs):
+            raise StorageError("experience references an untrusted record")
+    lifecycle = _experience_lifecycle(trusted)
+    active_warning_counts: Dict[str, int] = {}
+    by_id = {record["id"]: record for record in trusted}
+    for record in trusted:
+        strategy_id = record["experience"]["relation"]["strategy_id"]
+        if strategy_id is not None and by_id[strategy_id]["kind"] != "strategy":
+            raise StorageError("warning has invalid strategy relation")
+        if (
+            record["kind"] != "warning"
+            or strategy_id is None
+            or lifecycle[record["id"]] != "active"
+            or lifecycle[strategy_id] != "active"
+        ):
+            continue
+        active_warning_counts[strategy_id] = active_warning_counts.get(strategy_id, 0) + 1
+        if active_warning_counts[strategy_id] > 8:
+            raise StorageError("strategy has too many active warnings")
+    return [dict(record, lifecycle=lifecycle[record["id"]]) for record in sorted(trusted, key=lambda item: item["id"])]
+
+
+def load_trusted_experiences(repo_path: Optional[Union[str, Path]] = None) -> List[Dict[str, Any]]:
+    """Return receipt-gated, current-identity v2 records with derived lifecycle."""
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    _ensure_initialized_for_projects(layout, repo_root)
+    _validate_within_root(repo_root, layout["shared_experiences"], target_is_file=False)
+    _validate_within_root(repo_root, layout["receipt_dir"], target_is_file=False)
+    return _load_trusted_experiences(identity, layout["shared_experiences"], layout["receipt_dir"], repo_root)
 
 
 def _build_review_receipt(
@@ -780,6 +945,7 @@ def initialize_repository(repo_path: Optional[Union[str, Path]] = None) -> Dict[
     continuity_md = layout["continuity_md"]
     local = layout["local"]
     shared_records = layout["shared_records"]
+    shared_experiences = layout["shared_experiences"]
     lock = layout["lock"]
     checkpoint_dir = layout["checkpoint_dir"]
     continuity = layout["continuity"]
@@ -803,6 +969,7 @@ def initialize_repository(repo_path: Optional[Union[str, Path]] = None) -> Dict[
             continuity.mkdir(parents=True, exist_ok=True)
             local.mkdir(parents=True, exist_ok=True)
             shared_records.mkdir(parents=True, exist_ok=True)
+            shared_experiences.mkdir(parents=True, exist_ok=True)
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
             if not manifest.exists():
@@ -900,6 +1067,7 @@ def create_candidate(
     *,
     semantic_role: str = "inference",
     record_id: Optional[str] = None,
+    experience: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if not isinstance(content, dict):
         raise StorageError("invalid content-json")
@@ -912,15 +1080,20 @@ def create_candidate(
     candidate_id = _generate_candidate_id() if record_id is None else record_id
 
     try:
-        record = _build_candidate_record(
-            identity,
-            candidate_id=candidate_id,
-            kind=kind,
-            semantic_role=semantic_role,
-            summary=summary,
-            content=content,
-            paths=list(paths or []),
-        )
+        if kind in ("strategy", "warning"):
+            if not isinstance(experience, dict):
+                raise StorageError("invalid experience payload")
+            record = _build_experience_candidate_record(
+                identity, candidate_id=candidate_id, kind=kind, semantic_role=semantic_role,
+                summary=summary, content=content, paths=list(paths or []), experience=experience,
+            )
+        else:
+            if experience is not None:
+                raise StorageError("invalid experience payload")
+            record = _build_candidate_record(
+                identity, candidate_id=candidate_id, kind=kind, semantic_role=semantic_role,
+                summary=summary, content=content, paths=list(paths or []),
+            )
     except (RecordValidationError, SecretScanError) as exc:
         raise StorageError("invalid candidate payload") from exc
 
@@ -976,6 +1149,73 @@ def _scan_source_candidate_conflict(
             raise StorageConflictError("project record id conflicts with existing source candidate")
 
 
+def _validate_experience_review(candidate: Dict[str, Any], identity: Dict[str, str], layout: Dict[str, Path], repo_root: Path) -> None:
+    trusted = _load_trusted_experiences(identity, layout["shared_experiences"], layout["receipt_dir"], repo_root)
+    trusted_records = [{key: value for key, value in record.items() if key != "lifecycle"} for record in trusted]
+    by_id = {record["id"]: record for record in trusted_records}
+    lifecycle = _experience_lifecycle(trusted_records)
+    lineage = candidate["experience"]["lineage"]
+    for target_id in lineage["supersedes"]:
+        target = by_id.get(target_id)
+        if target is None or target["kind"] != candidate["kind"] or lifecycle[target_id] != "active":
+            raise StorageError("invalid experience supersession target")
+        if any(target_id in record["experience"]["lineage"]["supersedes"] for record in trusted_records):
+            raise StorageConflictError("experience supersession target already has a successor")
+    for target_id in lineage["deprecates"]:
+        if target_id not in by_id or lifecycle[target_id] not in ("active", "superseded"):
+            raise StorageError("invalid experience deprecation target")
+    strategy_id = candidate["experience"]["relation"]["strategy_id"]
+    if strategy_id is not None:
+        target = by_id.get(strategy_id)
+        if target is None or target["kind"] != "strategy" or lifecycle[strategy_id] != "active":
+            raise StorageError("invalid experience strategy target")
+        warning_count = sum(
+            record["kind"] == "warning" and record["experience"]["relation"]["strategy_id"] == strategy_id
+            and lifecycle[record["id"]] == "active" for record in trusted_records
+        )
+        if warning_count >= 8:
+            raise StorageConflictError("strategy already has eight active warnings")
+
+
+def _review_experience_candidate(
+    candidate: Dict[str, Any], candidate_id: str, identity: Dict[str, str], layout: Dict[str, Path], repo_root: Path,
+) -> Dict[str, Any]:
+    project_id = _compute_project_record_id(candidate)
+    project_path = layout["shared_experiences"] / f"{project_id}.json"
+    receipt_path = layout["receipt_dir"] / f"{project_id}.json"
+    _validate_within_root(repo_root, project_path, target_is_file=True)
+    _validate_within_root(repo_root, receipt_path, target_is_file=True)
+    all_records = _iter_experience_records(repo_root, layout["shared_experiences"])
+    _scan_source_candidate_conflict(all_records, candidate_id, identity["repository_id"], identity["worktree_id"], project_id)
+    expected = _build_experience_project_record(candidate=candidate, project_id=project_id, timestamp=_timestamp_utc())
+    if project_path.exists():
+        existing = _read_experience_record(project_path)
+        if existing["created_at"] != existing["review"]["confirmed_at"]:
+            raise StorageError("experience confirmation timestamp mismatch")
+        if _project_record_signature(existing) != _project_record_signature(expected):
+            raise StorageConflictError("experience record already exists with conflicting content")
+        trusted = _load_trusted_experiences(identity, layout["shared_experiences"], layout["receipt_dir"], repo_root)
+        if any(record["id"] == project_id for record in trusted):
+            return {"id": project_id, "created": False, "candidate_id": candidate_id}
+        _validate_experience_review(candidate, identity, layout, repo_root)
+        reviewed, result = existing, {"id": project_id, "created": False, "candidate_id": candidate_id}
+    else:
+        _validate_experience_review(candidate, identity, layout, repo_root)
+        reviewed, result = expected, {"id": project_id, "created": True, "candidate_id": candidate_id}
+    try:
+        layout["receipt_dir"].mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(receipt_path, canonical_json_dumps(_build_review_receipt(identity, reviewed)))
+    except Exception as exc:
+        raise StorageError("review receipt persistence failed") from exc
+    if result["created"]:
+        try:
+            layout["shared_experiences"].mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(project_path, canonical_json_dumps(reviewed))
+        except Exception as exc:
+            raise StorageError("experience persistence failed") from exc
+    return result
+
+
 def review_candidate(
     repo_path: Optional[Union[str, Path]],
     candidate_id: str,
@@ -1001,6 +1241,9 @@ def review_candidate(
         _validate_within_root(repo_root, candidate_path, target_is_file=True)
         candidate = _validate_candidate_file(candidate_path, validated_candidate_id)
         _validate_candidate_business_identity(candidate, identity)
+
+        if candidate["schema_version"] == 2:
+            return _review_experience_candidate(candidate, validated_candidate_id, identity, layout, repo_root)
 
         project_id = _compute_project_record_id(candidate)
         project_path = shared_records / f"{project_id}.json"
@@ -1193,6 +1436,7 @@ __all__ = [
     "StorageConflictError",
     "StoragePathError",
     "load_resume_state",
+    "load_trusted_experiences",
     "initialize_repository",
     "create_checkpoint",
     "create_candidate",

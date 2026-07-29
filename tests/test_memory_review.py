@@ -111,6 +111,23 @@ def _receipt_path(repo: Path, record_id: str) -> Path:
     )
 
 
+def _experience_path(repo: Path, record_id: str) -> Path:
+    return repo / ".continuity" / "shared" / "experiences" / f"{record_id}.json"
+
+
+def _write_experience_receipt(repo: Path, record: Dict[str, Any]) -> None:
+    payload = {
+        "schema_version": 1,
+        "repository_id": identity.get_git_identity(repo)["repository_id"],
+        "worktree_id": identity.get_git_identity(repo)["worktree_id"],
+        "record_id": record["id"],
+        "content_hash": record["integrity"]["content_hash"],
+    }
+    path = _receipt_path(repo, record["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(schema.canonical_json_dumps(payload), encoding="utf-8")
+
+
 def _continuity_path(repo: Path) -> Path:
     return repo / ".continuity" / "CONTINUITY.md"
 
@@ -129,7 +146,235 @@ def _project_id_for_candidate(repo: Path, candidate_id: str) -> str:
     raise AssertionError("project record not found")
 
 
+def _experience(*, supersedes: Optional[list[str]] = None, deprecates: Optional[list[str]] = None, strategy_id: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "applicability": {"task_types": ["bugfix"], "signals": [], "error_patterns": []},
+        "evidence": {"checks": []},
+        "lineage": {"supersedes": supersedes or [], "deprecates": deprecates or []},
+        "relation": {"strategy_id": strategy_id},
+    }
+
+
 class TestAgentMemoryReview(unittest.TestCase):
+    def test_v2_experience_review_sidecar_and_receipt_gated_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            before = _continuity_path(repo).read_bytes()
+            create_candidate(repo, "strategy", "receipt repair", {"body": "verify receipt first"},
+                             record_id="cand-exp", experience=_experience())
+            reviewed = review_candidate(repo, "cand-exp")
+            sidecar = repo / ".continuity" / "shared" / "experiences" / f"{reviewed['id']}.json"
+            self.assertTrue(sidecar.exists())
+            self.assertEqual(_continuity_path(repo).read_bytes(), before)
+            loaded = storage.load_trusted_experiences(repo)
+            self.assertEqual([(item["id"], item["lifecycle"]) for item in loaded], [(reviewed["id"], "active")])
+            sidecar_bytes = sidecar.read_bytes()
+            receipt_bytes = _receipt_path(repo, reviewed["id"]).read_bytes()
+            self.assertFalse(review_candidate(repo, "cand-exp")["created"])
+            self.assertEqual(sidecar.read_bytes(), sidecar_bytes)
+            self.assertEqual(_receipt_path(repo, reviewed["id"]).read_bytes(), receipt_bytes)
+            _receipt_path(repo, reviewed["id"]).unlink()
+            self.assertEqual(storage.load_trusted_experiences(repo), [])
+
+    def test_v2_lifecycle_is_derived_and_predecessor_is_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(repo, "strategy", "old", {"body": "old"}, record_id="cand-old", experience=_experience())
+            old = review_candidate(repo, "cand-old")["id"]
+            old_path = repo / ".continuity" / "shared" / "experiences" / f"{old}.json"
+            old_bytes = old_path.read_bytes()
+            create_candidate(repo, "strategy", "new", {"body": "new"}, record_id="cand-new", experience=_experience(supersedes=[old]))
+            new = review_candidate(repo, "cand-new")["id"]
+            states = {item["id"]: item["lifecycle"] for item in storage.load_trusted_experiences(repo)}
+            self.assertEqual(states, {old: "superseded", new: "active"})
+            self.assertEqual(old_path.read_bytes(), old_bytes)
+
+    def test_v2_rejects_untrusted_lineage_target_and_v1_resume_rejects_misplaced_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(repo, "strategy", "base", {"body": "base"}, record_id="cand-base", experience=_experience())
+            base = review_candidate(repo, "cand-base")["id"]
+            _receipt_path(repo, base).unlink()
+            create_candidate(repo, "strategy", "next", {"body": "next"}, record_id="cand-next", experience=_experience(supersedes=[base]))
+            with self.assertRaises(StorageError):
+                review_candidate(repo, "cand-next")
+            source = repo / ".continuity" / "shared" / "experiences" / f"{base}.json"
+            misplaced = repo / ".continuity" / "shared" / "records" / f"{base}.json"
+            misplaced.write_bytes(source.read_bytes())
+            create_checkpoint(repo, "checkpoint", {"value": 1}, record_id="cp-v2")
+            with self.assertRaises(StorageError):
+                load_resume_state(repo)
+
+    def test_v2_deprecation_precedence_and_duplicate_transition_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(repo, "strategy", "base", {"body": "base"}, record_id="cand-base", experience=_experience())
+            base = review_candidate(repo, "cand-base")["id"]
+            create_candidate(repo, "strategy", "next", {"body": "next"}, record_id="cand-next", experience=_experience(supersedes=[base]))
+            review_candidate(repo, "cand-next")
+            create_candidate(repo, "strategy", "duplicate", {"body": "duplicate"}, record_id="cand-duplicate", experience=_experience(supersedes=[base]))
+            with self.assertRaises(StorageError):
+                review_candidate(repo, "cand-duplicate")
+            create_candidate(repo, "strategy", "deprecated", {"body": "deprecated"}, record_id="cand-deprecated", experience=_experience(deprecates=[base]))
+            review_candidate(repo, "cand-deprecated")
+            states = {record["id"]: record["lifecycle"] for record in storage.load_trusted_experiences(repo)}
+            self.assertEqual(states[base], "deprecated")
+
+    def test_v2_projection_overflow_is_rejected_before_candidate_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            strategy_id = "cand-near-strategy"
+            strategy_direct = {"id": strategy_id, "kind": "strategy", "summary": "near limit", "body": "", "activation": "direct", "related_from": None}
+            strategy_body = "x" * (schema.MAX_EXPERIENCE_PROJECTION_BYTES - len(schema.canonical_json_dumps(strategy_direct).encode("utf-8")))
+            with self.assertRaises(StorageError):
+                create_candidate(repo, "strategy", "near limit", {"body": strategy_body}, record_id=strategy_id, experience=_experience())
+            self.assertFalse(_candidate_path(repo, strategy_id).exists())
+
+            warning_id = "cand-near-warning"
+            final_direct = {"id": "f" * 64, "kind": "warning", "summary": "near limit", "body": "", "activation": "direct", "related_from": None}
+            warning_body = "x" * (schema.MAX_EXPERIENCE_PROJECTION_BYTES - len(schema.canonical_json_dumps(final_direct).encode("utf-8")))
+            self.assertTrue(create_candidate(repo, "warning", "near limit", {"body": warning_body}, record_id=warning_id, experience=_experience())["created"])
+            self.assertTrue(_candidate_path(repo, warning_id).exists())
+
+            related_id = "cand-near-related-warning"
+            with self.assertRaises(StorageError):
+                create_candidate(repo, "warning", "near limit", {"body": warning_body}, record_id=related_id, experience=_experience(strategy_id="strategy-id"))
+            self.assertFalse(_candidate_path(repo, related_id).exists())
+
+    def test_v2_load_rejects_warning_relation_to_non_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(repo, "strategy", "strategy", {"body": "strategy"}, record_id="cand-strategy", experience=_experience())
+            strategy = review_candidate(repo, "cand-strategy")["id"]
+            create_candidate(repo, "warning", "target", {"body": "target"}, record_id="cand-target", experience=_experience())
+            target = review_candidate(repo, "cand-target")["id"]
+            create_candidate(repo, "warning", "attached", {"body": "attached"}, record_id="cand-attached", experience=_experience(strategy_id=strategy))
+            attached = review_candidate(repo, "cand-attached")["id"]
+            record = json.loads(_experience_path(repo, attached).read_text(encoding="utf-8"))
+            record["experience"]["relation"]["strategy_id"] = target
+            record = schema.annotate_with_integrity(record)
+            _experience_path(repo, attached).write_text(schema.canonical_json_dumps(record), encoding="utf-8")
+            _write_experience_receipt(repo, record)
+            with self.assertRaises(StorageError):
+                storage.load_trusted_experiences(repo)
+
+    def test_v2_review_rejects_untrusted_precreated_sidecar_and_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(repo, "warning", "untrusted", {"body": "untrusted"}, record_id="cand-untrusted", experience=_experience(strategy_id="unknown-strategy"))
+            candidate = json.loads(_candidate_path(repo, "cand-untrusted").read_text(encoding="utf-8"))
+            project_id = storage._compute_project_record_id(candidate)
+            precreated = storage._build_experience_project_record(candidate=candidate, project_id=project_id, timestamp="2026-07-29T00:00:00Z")
+            _experience_path(repo, project_id).parent.mkdir(parents=True, exist_ok=True)
+            _experience_path(repo, project_id).write_text(schema.canonical_json_dumps(precreated), encoding="utf-8")
+            with self.assertRaises(StorageError):
+                review_candidate(repo, "cand-untrusted")
+            self.assertFalse(_receipt_path(repo, project_id).exists())
+
+            create_candidate(repo, "strategy", "old", {"body": "old"}, record_id="cand-old", experience=_experience())
+            old = review_candidate(repo, "cand-old")["id"]
+            create_candidate(repo, "strategy", "next", {"body": "next"}, record_id="cand-next", experience=_experience(supersedes=[old]))
+            next_id = review_candidate(repo, "cand-next")["id"]
+            old_record = json.loads(_experience_path(repo, old).read_text(encoding="utf-8"))
+            old_record["experience"]["lineage"]["supersedes"] = [next_id]
+            old_record = schema.annotate_with_integrity(old_record)
+            _experience_path(repo, old).write_text(schema.canonical_json_dumps(old_record), encoding="utf-8")
+            _write_experience_receipt(repo, old_record)
+            with self.assertRaises(StorageError):
+                storage.load_trusted_experiences(repo)
+
+    def test_v2_receipt_sidecar_timestamp_and_fanout_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(repo, "strategy", "base", {"body": "base"}, record_id="cand-base", experience=_experience())
+            base = review_candidate(repo, "cand-base")["id"]
+            for index in range(8):
+                candidate_id = f"cand-warning-{index}"
+                create_candidate(repo, "warning", candidate_id, {"body": candidate_id}, record_id=candidate_id, experience=_experience(strategy_id=base))
+                review_candidate(repo, candidate_id)
+            self.assertEqual(sum(record["kind"] == "warning" for record in storage.load_trusted_experiences(repo)), 8)
+
+            create_candidate(repo, "warning", "overflow", {"body": "overflow"}, record_id="cand-overflow", experience=_experience(strategy_id=base))
+            with self.assertRaises(StorageConflictError):
+                review_candidate(repo, "cand-overflow")
+            overflow_candidate = json.loads(_candidate_path(repo, "cand-overflow").read_text(encoding="utf-8"))
+            overflow_id = storage._compute_project_record_id(overflow_candidate)
+            self.assertFalse(_receipt_path(repo, overflow_id).exists())
+            overflow = storage._build_experience_project_record(candidate=overflow_candidate, project_id=overflow_id, timestamp="2026-07-29T00:00:00Z")
+            _experience_path(repo, overflow_id).write_text(schema.canonical_json_dumps(overflow), encoding="utf-8")
+            _write_experience_receipt(repo, overflow)
+            with self.assertRaises(StorageError):
+                storage.load_trusted_experiences(repo)
+
+            _experience_path(repo, overflow_id).unlink()
+            _receipt_path(repo, overflow_id).unlink()
+            base_record = json.loads(_experience_path(repo, base).read_text(encoding="utf-8"))
+            bad_receipt = json.loads(_receipt_path(repo, base).read_text(encoding="utf-8"))
+            bad_receipt["content_hash"] = "sha256:" + "0" * 64
+            _receipt_path(repo, base).write_text(schema.canonical_json_dumps(bad_receipt), encoding="utf-8")
+            with self.assertRaises(StorageError):
+                storage.load_trusted_experiences(repo)
+            _write_experience_receipt(repo, base_record)
+            warning_path = _experience_path(repo, storage._compute_project_record_id(json.loads(_candidate_path(repo, "cand-warning-0").read_text(encoding="utf-8"))))
+            warning_bytes = warning_path.read_bytes()
+            warning_path.write_text("{", encoding="utf-8")
+            with self.assertRaises(StorageError):
+                storage.load_trusted_experiences(repo)
+            warning_path.write_bytes(warning_bytes)
+            base_record["created_at"] = "2026-07-28T00:00:00Z"
+            base_record = schema.annotate_with_integrity(base_record)
+            _experience_path(repo, base).write_text(schema.canonical_json_dumps(base_record), encoding="utf-8")
+            _write_experience_receipt(repo, base_record)
+            with self.assertRaises(StorageError):
+                storage.load_trusted_experiences(repo)
+
+    def test_v2_detached_and_cross_project_visibility_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _make_git_repo(repo)
+            initialize_repository(repo)
+            create_candidate(repo, "strategy", "main", {"body": "main"}, record_id="cand-main", experience=_experience())
+            main = review_candidate(repo, "cand-main")["id"]
+            head = _run_git(["rev-parse", "HEAD"], repo).stdout.strip()
+            _run_git(["checkout", "--detach", head], repo)
+            self.assertEqual(storage.load_trusted_experiences(repo), [])
+            _run_git(["checkout", "main"], repo)
+            self.assertEqual(storage.load_trusted_experiences(repo)[0]["id"], main)
+
+            other = Path(workdir) / "other"
+            other.mkdir()
+            _make_git_repo(other)
+            initialize_repository(other)
+            create_candidate(other, "strategy", "other", {"body": "other"}, record_id="cand-other", experience=_experience())
+            other_id = review_candidate(other, "cand-other")["id"]
+            _experience_path(repo, other_id).write_bytes(_experience_path(other, other_id).read_bytes())
+            with self.assertRaises(StorageError):
+                storage.load_trusted_experiences(repo)
     def test_candidate_path_schema_and_scaffold_isolation(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:
             repo = Path(workdir) / "repo"
