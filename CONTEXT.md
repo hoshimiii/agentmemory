@@ -2,65 +2,77 @@
 
 ## Current Brief
 
-This turn's only goal: specify, implement, and verify the P0 private experience-governance layer while preserving the accepted AgentMemory trust boundary.
+This turn's only goal: finish and verify the opt-in scheduled AI candidate-distillation slot, document the next observability requirements without implementing telemetry, and prove the plugin can be isolated in a sandbox Codex home.
 
 ### Deliverables
 
-- Produce one self-contained P0 requirements document covering rationale, data contracts, lifecycle, applicability, evidence, dynamic context activation, CLI/storage/render behavior, compatibility, security boundaries, and rollback.
-- Add compact project-scoped `strategy` and `warning` experience records through the existing candidate -> explicit review -> local receipt trust path.
-- Add explicit lifecycle and lineage sufficient to represent `active`, `superseded`, and `deprecated` reviewed experience without automatic promotion or deletion.
-- Add bounded applicability and verification evidence fields that are integrity-protected and fail closed; self-reported scores are not promotion evidence.
-- Add an explicit matcher/renderer for task signals that returns only applicable, locally trusted active experience and grows context according to activated relations instead of one fixed 6000-byte budget.
-- Preserve existing checkpoint, decision, incident, constraint, OpenViking retrieval, branch/worktree isolation, receipt, secret-scan, and hook behavior unless the approved requirements explicitly replace the fixed resume budget.
-- Provide a multi-level checklist and tests mapping each requirement to observable evidence.
+- Add a worktree-local scheduler configuration with an explicit `enabled` switch, provider, model, cron expression, timezone label, and bounded provider options.
+- Add fixed adapters for Codex CLI, Claude Code, and Gemini CLI; adapters use argument arrays without shell interpolation and run the selected AI in a read-only analysis mode.
+- Add `schedule configure`, `enable`, `disable`, `status`, `plan`, and `run` commands. `plan` is read-only; `run` refuses disabled or malformed configuration.
+- Have `schedule run` request a strict, bounded candidate batch, validate it through the existing candidate path, create at most five local candidates, and return a human-review report. It must never call review or write shared memory.
+- Produce one final-state requirements document and focused tests covering configuration, cron validation, adapter rendering, provider-output parsing, candidate-only writes, failure handling, and compatibility.
+- Add a bounded M10 requirements section for end-to-end write/retrieval/injection/outcome traceability and counterfactual usefulness experiments; do not implement it in M9.
+- Install the current plugin package only into an isolated temporary Codex home and validate discovery/configuration without a paid provider run.
 
 ### Non-goals
 
-- No EvoMap Hub, GDI, credits, public asset import, network sharing, autonomous mutation, live promotion, evaluator self-editing, or background daemon.
-- No Capsule solidification, EvolutionEvent scoring, offline replay engine, shadow routing, automatic signal extraction, transcript/reasoning-trace ingestion, or cross-project experience transfer in P0.
-- No OpenViking writes or use of OpenViking results as promotion evidence.
-- No browser-extension integration, workspace/global memory, MCP/app/UI, installation, remote push, release, or deployment.
+- No automatic review, receipt creation, durable-memory promotion, lifecycle mutation, deletion, or shared-memory write.
+- No transcript, `transcript_path`, `PLUGIN_DATA`, hidden reasoning, platform memory, OpenViking, cross-project aggregation, or browser-extension input.
+- No scheduler installation, Codex automation creation, Windows Task Scheduler/cron mutation, real-host plugin installation, merge, push, release, or deployment in this phase.
+- No observability trace writer, report database, telemetry service, automatic usefulness inference, or M10 runtime code.
+- No provider plugin discovery, arbitrary shell templates, stored credentials, daemon, UI, remote Hub, replay evaluator, or shadow promotion.
 
 ### Settled Contracts
 
-- Existing candidate review, exact repository/worktree/branch/head checks, content integrity, secret scanning, local receipts, atomic writes, and fail-closed loading remain the sole trust and promotion boundary.
-- `strategy` and `warning` are advisory untrusted context below higher-priority instructions and current repository evidence; they never execute tools or mutate a repository by themselves.
-- A strategy and its warnings remain separate objects. Lineage links are identifiers only and cannot bypass review, receipt, repository identity, applicability, or lifecycle checks.
-- The generator cannot modify evaluator criteria or convert its own claimed success into verified evidence. P0 stores objective command/result metadata only after explicit proposal and review.
-- Dynamic context is relation-driven but not unbounded: explicit task-time matching starts at 8192 bytes, grows by 2048 bytes per activated Strategy-Warning relation, and stops at 24576 bytes. Each compact record is at most 2048 bytes and is included whole.
-- Existing `SessionStart` continuity semantics and its fixed 6000-byte checkpoint capsule remain unchanged. P0 adds explicit task-time experience matching and does not infer tasks in SessionStart.
-- P0 uses strict schema-version dispatch and stores reviewed v2 experiences under `.continuity/shared/experiences/`; the v1 schema, v1 shared records, manifest, `CONTINUITY.md`, hooks, and OpenViking adapter remain unchanged.
+- Enabling the schedule is standing authorization to create reviewable local candidates only. `review --confirm` remains the sole promotion route and still needs immediate explicit human confirmation.
+- Configuration lives under `.continuity/local/worktrees/<worktree-id>/scheduler.json`, remains ignored, embeds the expected repository/worktree identity, contains no credentials, and uses atomic locked writes.
+- Canonical scheduling input is a validated POSIX-style five-field numeric cron expression. Seconds, macros, Quartz tokens, names, and provider-native recurrence syntax are outside M9; an outer scheduler consumes the returned plan.
+- Providers are a closed registry: `codex`, `claude`, and `gemini`. The configured model is passed as one argument. Codex may also receive a validated reasoning effort.
+- The AI process gets a strict JSON proposal contract and provider-enforced read-only repository access. AgentMemory, not the AI process, performs candidate writes after strict adapter-specific parsing and a post-run identity check.
+- One run accepts at most five proposals and bounded output, deduplicates identical proposals, and rejects a checkout change before any write. Candidate IDs are deterministic for repository identity, current head, and normalized proposal so retries on unchanged evidence are idempotent.
+- Invalid provider output creates no candidate. A valid batch may report individual proposal rejection, but promotion remains impossible without a later human review.
+- Existing v1/v2 schemas, hooks, SessionStart, dynamic experience matching, OpenViking adapter, and reviewed-memory trust boundary remain unchanged.
 
 ### File and Phase Scope
 
-- Investigation may inspect schema/storage/render/CLI/hooks, all tests, public docs/skill, and accepted M6/M7 contracts; investigation agents are read-only.
-- Requirements are recorded in one P0 requirements document; current task state remains only in this `CONTEXT.md` Current Brief and Pending List.
-- Approved implementation surfaces are `agentmemory/schema.py`, `agentmemory/storage.py`, `agentmemory/render.py`, `agentmemory/cli.py`, new `schemas/experience-v2.schema.json`, focused tests, and public documentation/skill. `schemas/record-v1.schema.json` may be regression-checked but not changed.
-- Hooks, OpenViking code, manifest contents, and v1 resume rendering are do-not-touch.
-- Work is isolated on `codex/m8-p0-experience-governance`, based on local `main` commit `06ddbcc`.
+- Current state remains only in this `CONTEXT.md` Current Brief and Pending List; lasting user-facing behavior is documented in `docs/SCHEDULED_MEMORY_CANDIDATES_REQUIREMENTS.zh-CN.md`.
+- Approved implementation surfaces are a new pure-contract `agentmemory/scheduler.py`, a new execution boundary `agentmemory/schedule_runtime.py`, `agentmemory/storage.py`, `agentmemory/cli.py`, focused tests, `README.md`, `SECURITY.md`, `PRIVACY.md`, and the public AgentMemory Skill.
+- Hooks, record schemas, OpenViking code, resume rendering, plugin manifest version, and reviewed-record behavior are do-not-touch.
+- Work is isolated on `codex/m9-scheduled-memory-candidates`, based on P0 commit `e81deed`; pre-existing `.gitignore`, `.continuity/`, and context-audit changes are user state to preserve.
 
-### Acceptance
+### Acceptance Commands
 
-- Requirements and multi-level checklist map every P0 behavior, security boundary, compatibility rule, and deferred feature to acceptance evidence.
-- Existing tests remain green; new tests cover both valid flows and malformed, stale, cross-project, missing-receipt, lifecycle, relation-cycle, context-growth, ceiling, and deterministic-order cases.
-- Candidate and review remain the only promotion route; unreviewed, unreceipted, superseded, deprecated, inapplicable, malformed, and cross-project experience never becomes active task context.
-- Dynamic output is deterministic for the same identity, signals, active graph, and safety limit; more activated valid relations may grow output, while cycles and fan-out remain bounded.
-- `py -3 -m unittest discover -s tests -v`, `python -m unittest discover -s tests -v`, compile checks, Python 3.9 parsing when available, JSON/schema validation, skill/plugin validation, and `git diff --check` pass.
+- `py -3 -m unittest tests.test_scheduler -v`
+- `py -3 -m unittest discover -s tests -v`
+- `python -m unittest discover -s tests -v`
+- `py -3 -m compileall -q agentmemory hooks skills`
+- Python 3.9 AST parsing, JSON parsing, Skill validation, Plugin validation, and `git diff --check`.
+- Dry-run plans for Codex, Claude, and Gemini must contain no shell command string, secret, review command, receipt path, or shared-memory write.
 
 ### Stop Conditions
 
-- Stop if a slice requires weakening explicit review, receipt, identity, secret, path, integrity, or fail-closed behavior.
-- Stop if a schema migration would make existing v1 files unreadable, silently reinterpret existing records, or require destructive rewriting without a separately approved migration contract.
-- Stop if implementation requires transcript access, a new automatic hook event, network activity, external publication, installation, deployment, or modification outside this repository.
-- Stop and return architecture decisions to root if relation activation, lifecycle transitions, evidence authority, or dynamic safety limits cannot be implemented within the approved contract.
+- Stop if a provider requires write-capable AI permissions, shell interpolation, credential persistence, or bypassing provider safety controls.
+- Stop if candidate generation cannot remain bounded, parseable, secret-scanned, worktree-scoped, and separate from human review/promotion.
+- Stop if implementation requires changing Hook events, reviewed schemas, `CONTINUITY.md`, OpenViking, or the existing receipt trust path.
+- Stop before installing a scheduler, invoking a paid/provider run for acceptance, or making any external write without separate authorization.
 
 ## Pending List
 
-- Current Work: Done.
-- The approved and implemented contract is `docs/P0_EXPERIENCE_GOVERNANCE_REQUIREMENTS.zh-CN.md`; lifecycle changes require a new immutable candidate and explicit review.
-- No architecture, implementation, review, or verification blocker remains.
-- Deferred by contract: Hub, automatic promotion or mutation, Capsule/Event, replay/shadow, transcript-derived signals, OpenViking writes, installation, merge, push, release, and deployment.
-- Exact Next Action: None.
+- Current Work: M9 implementation, final regression, independent re-review, and isolated Codex-home installation are complete.
+- OpenViking was queried with the explicit project URI but its local service was unavailable; this is not a feature precondition and no repair/start was attempted.
+- External scheduler installation and live paid-provider execution remain deferred acceptance gates.
+- M10 observability and usefulness-test requirements are documented but intentionally not implemented in M9.
+- Exact Next Action: obtain explicit authorization before real-host installation, external scheduler creation, or a live paid-provider smoke run; otherwise start M10 observability as a separate branch.
+
+## M9 Acceptance Evidence
+
+- Branch: `codex/m9-scheduled-memory-candidates`, based on P0 commit `e81deed`.
+- `py -3 -m unittest discover -s tests -v`: 129 passed, 2 expected Windows `mkfifo` capability skips, 370.580 seconds.
+- `python -m unittest discover -s tests -v`: 129 passed, 2 expected Windows `mkfifo` capability skips, 392.318 seconds.
+- Fresh independent `gpt-5.6-terra xhigh` review found one disable/run TOCTOU issue; after the root fix and focused regression, re-review reported no remaining P0/P1 findings.
+- A copied package passed Plugin and Skill validation, then Codex CLI 0.147.0 installed and enabled version 0.1.1 in an isolated temporary `CODEX_HOME`. A temporary Git repository passed status, init, disabled schedule configuration, plan, and `run --dry-run` using `codex`, `gpt-5.6-terra`, `xhigh`, `0 3 * * *`, and `Asia/Tokyo`.
+- The temporary Codex home refused only PATH-alias creation because it was under the OS temp directory; plugin discovery, installation, enablement, and dry-run were successful.
+- No live provider request, cost-bearing call, external scheduler, real Codex home, shared memory, review, promotion, merge, push, or deployment was used.
 
 ## P0 Acceptance Evidence
 

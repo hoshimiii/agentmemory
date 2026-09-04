@@ -10,7 +10,7 @@ import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from .identity import GIT_IDENTITY_ERROR, GitIdentityError, get_git_identity
 from .locking import FileLock
@@ -28,6 +28,12 @@ from .render import (
     render_resume_capsule,
 )
 from .security import SecretScanError
+from .scheduler import (
+    MAX_PROVIDER_OUTPUT_BYTES,
+    SchedulerValidationError,
+    parse_strict_json,
+    validate_scheduler_config,
+)
 
 LOCAL_IGNORE_LINE = ".continuity/local/"
 
@@ -64,12 +70,17 @@ def _lstat(path: Path) -> Optional[os.stat_result]:
         return None
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+
 def _validate_within_root(root: Path, target: Path, *, target_is_file: bool) -> None:
     root_abs = root.absolute()
     root_info = _lstat(root_abs)
     if root_info is not None:
         root_mode = stat.S_IFMT(root_info.st_mode)
-        if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+        if stat.S_ISLNK(root_mode) or _is_reparse_point(root_info) or not stat.S_ISDIR(root_mode):
             raise StoragePathError("path target is invalid")
 
     target_abs = target.absolute()
@@ -88,7 +99,7 @@ def _validate_within_root(root: Path, target: Path, *, target_is_file: bool) -> 
             continue
 
         mode = stat.S_IFMT(info.st_mode)
-        if stat.S_ISLNK(mode):
+        if stat.S_ISLNK(mode) or _is_reparse_point(info):
             raise StoragePathError("path contains symbolic link")
 
         if stat.S_ISDIR(mode):
@@ -186,6 +197,7 @@ def _resolve_layout(identity: Dict[str, str]) -> Dict[str, Path]:
         "shared_experiences": continuity / "shared" / "experiences",
         "lock": local / "locks" / "write.lock",
         "checkpoint_dir": checkpoints,
+        "scheduler_config": worktree_local / "scheduler.json",
     }
 
 
@@ -247,6 +259,12 @@ def _validate_path_set(layout: Dict[str, Path], repo_root: Path) -> None:
     _validate_within_root(repo_root, layout["receipt_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["checkpoint_dir"], target_is_file=False)
     _validate_within_root(repo_root, layout["lock"], target_is_file=True)
+
+
+def _validate_scheduler_config_path(layout: Dict[str, Path], repo_root: Path) -> None:
+    """Keep optional scheduler state from affecting unrelated storage commands."""
+
+    _validate_within_root(repo_root, layout["scheduler_config"], target_is_file=True)
 
 
 def _is_initialized_layout(layout: Dict[str, Path], repo_root: Path, *, require_gitignore: bool) -> bool:
@@ -346,6 +364,7 @@ def _build_candidate_record(
     summary: str,
     content: Dict[str, Any],
     paths: List[str],
+    source: str = "cli",
 ) -> Dict[str, Any]:
     record = {
         "schema_version": 1,
@@ -364,7 +383,7 @@ def _build_candidate_record(
             "paths": list(paths),
         },
         "provenance": {
-            "source": "cli",
+            "source": source,
             "evidence_refs": [],
             "source_record_id": candidate_id,
         },
@@ -382,14 +401,14 @@ def _build_candidate_record(
 
 def _build_experience_candidate_record(
     identity: Dict[str, str], *, candidate_id: str, kind: str, semantic_role: str,
-    summary: str, content: Dict[str, Any], paths: List[str], experience: Dict[str, Any],
+    summary: str, content: Dict[str, Any], paths: List[str], experience: Dict[str, Any], source: str = "cli",
 ) -> Dict[str, Any]:
     record = {
         "schema_version": 2, "id": candidate_id, "record_type": "candidate", "kind": kind,
         "status": "candidate", "semantic_role": semantic_role, "summary": summary, "scope": "local",
         "applies_to": {"repository_id": identity["repository_id"], "worktree_id": identity["worktree_id"],
                        "branch": identity["branch"], "head": identity["head"], "paths": list(paths)},
-        "provenance": {"source": "cli", "evidence_refs": [], "source_record_id": candidate_id},
+        "provenance": {"source": source, "evidence_refs": [], "source_record_id": candidate_id},
         "content": content, "experience": experience,
         "review": {"confirmed": False, "confirmed_by": None, "confirmed_at": None},
         "created_at": _timestamp_utc(),
@@ -993,6 +1012,112 @@ def initialize_repository(repo_path: Optional[Union[str, Path]] = None) -> Dict[
     }
 
 
+def checkout_identity_matches(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Return true only for an exact repository/worktree/branch/head match."""
+
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return False
+    fields = ("repository_id", "worktree_id", "branch", "head")
+    return all(isinstance(left.get(field), str) and left.get(field) == right.get(field) for field in fields)
+
+
+def load_scheduler_config(repo_path: Optional[Union[str, Path]]) -> Optional[Dict[str, Any]]:
+    """Read one exact, worktree-bound scheduler configuration without creating it."""
+
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    path = layout["scheduler_config"]
+    _validate_path_set(layout, repo_root)
+    return _read_scheduler_config(layout, identity)
+
+
+def _read_scheduler_config(layout: Dict[str, Path], identity: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    repo_root = layout["repo_root"]
+    path = layout["scheduler_config"]
+    _validate_scheduler_config_path(layout, repo_root)
+    info = _lstat(path)
+    if info is None:
+        return None
+    if _is_reparse_point(info) or not stat.S_ISREG(stat.S_IFMT(info.st_mode)):
+        raise StorageError("invalid scheduler configuration")
+    if info.st_size > MAX_PROVIDER_OUTPUT_BYTES:
+        raise StorageError("invalid scheduler configuration")
+    try:
+        with path.open("rb") as stream:
+            encoded = stream.read(MAX_PROVIDER_OUTPUT_BYTES + 1)
+        if len(encoded) > MAX_PROVIDER_OUTPUT_BYTES:
+            raise StorageError("invalid scheduler configuration")
+        raw = encoded.decode("utf-8", "strict")
+        payload = parse_strict_json(raw)
+        return validate_scheduler_config(payload, identity)
+    except (OSError, UnicodeError, SchedulerValidationError) as exc:
+        raise StorageError("invalid scheduler configuration") from exc
+
+
+def write_scheduler_config(repo_path: Optional[Union[str, Path]], config: Mapping[str, Any]) -> Dict[str, Any]:
+    """Atomically persist an exact config only for the current initialized worktree."""
+
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    path = layout["scheduler_config"]
+    try:
+        validated = validate_scheduler_config(config, identity)
+    except SchedulerValidationError as exc:
+        raise StorageError("invalid scheduler configuration") from exc
+    _ensure_initialized_for_checkpoint(layout, repo_root)
+    _validate_scheduler_config_path(layout, repo_root)
+    with FileLock(layout["lock"]):
+        _validate_path_set(layout, repo_root)
+        current = _load_identity(repo_root)
+        if not checkout_identity_matches(identity, current):
+            raise StorageError("scheduler checkout changed")
+        if not _is_initialized_layout(layout, repo_root, require_gitignore=True):
+            raise StorageError("repository is not initialized")
+        _validate_scheduler_config_path(layout, repo_root)
+        try:
+            _atomic_write_text(path, canonical_json_dumps(validated))
+        except Exception as exc:
+            raise StorageError("scheduler configuration persistence failed") from exc
+    return validated
+
+
+def _set_scheduler_enabled(repo_path: Optional[Union[str, Path]], enabled: bool) -> Dict[str, Any]:
+    identity = _load_identity(repo_path)
+    layout = _resolve_layout(identity)
+    repo_root = layout["repo_root"]
+    _validate_path_set(layout, repo_root)
+    _validate_scheduler_config_path(layout, repo_root)
+    with FileLock(layout["lock"]):
+        _validate_path_set(layout, repo_root)
+        _validate_scheduler_config_path(layout, repo_root)
+        current = _load_identity(repo_root)
+        if not checkout_identity_matches(identity, current):
+            raise StorageError("scheduler checkout changed")
+        config = _read_scheduler_config(layout, current)
+        if config is None:
+            if enabled:
+                raise StorageError("scheduler configuration is missing")
+            return {"configured": False, "enabled": False}
+        if not _is_initialized_layout(layout, repo_root, require_gitignore=True):
+            raise StorageError("repository is not initialized")
+        config["enabled"] = enabled
+        try:
+            _atomic_write_text(layout["scheduler_config"], canonical_json_dumps(config))
+        except Exception as exc:
+            raise StorageError("scheduler configuration persistence failed") from exc
+        return config
+
+
+def enable_scheduler_config(repo_path: Optional[Union[str, Path]]) -> Dict[str, Any]:
+    return _set_scheduler_enabled(repo_path, True)
+
+
+def disable_scheduler_config(repo_path: Optional[Union[str, Path]]) -> Dict[str, Any]:
+    return _set_scheduler_enabled(repo_path, False)
+
+
 def create_checkpoint(
     repo_path: Optional[Union[str, Path]],
     summary: str,
@@ -1068,9 +1193,13 @@ def create_candidate(
     semantic_role: str = "inference",
     record_id: Optional[str] = None,
     experience: Optional[Dict[str, Any]] = None,
+    expected_identity: Optional[Mapping[str, Any]] = None,
+    source: str = "cli",
 ) -> Dict[str, Any]:
     if not isinstance(content, dict):
         raise StorageError("invalid content-json")
+    if source not in ("cli", "scheduled-ai"):
+        raise StorageError("invalid candidate source")
 
     identity = _load_identity(repo_path)
     layout = _resolve_layout(identity)
@@ -1085,14 +1214,14 @@ def create_candidate(
                 raise StorageError("invalid experience payload")
             record = _build_experience_candidate_record(
                 identity, candidate_id=candidate_id, kind=kind, semantic_role=semantic_role,
-                summary=summary, content=content, paths=list(paths or []), experience=experience,
+                summary=summary, content=content, paths=list(paths or []), experience=experience, source=source,
             )
         else:
             if experience is not None:
                 raise StorageError("invalid experience payload")
             record = _build_candidate_record(
                 identity, candidate_id=candidate_id, kind=kind, semantic_role=semantic_role,
-                summary=summary, content=content, paths=list(paths or []),
+                summary=summary, content=content, paths=list(paths or []), source=source,
             )
     except (RecordValidationError, SecretScanError) as exc:
         raise StorageError("invalid candidate payload") from exc
@@ -1107,6 +1236,10 @@ def create_candidate(
         _validate_within_root(repo_root, target, target_is_file=True)
         if not _is_initialized_layout(layout, repo_root, require_gitignore=True):
             raise StorageError("repository is not initialized")
+        if expected_identity is not None:
+            current = _load_identity(repo_root)
+            if not checkout_identity_matches(expected_identity, current):
+                raise StorageError("candidate checkout changed")
 
         if _ensure_candidate_idempotent(target, record):
             return {"id": candidate_id, "created": False}
@@ -1118,6 +1251,36 @@ def create_candidate(
             raise StorageError("candidate persistence failed") from exc
 
     return {"id": candidate_id, "created": True}
+
+
+def preflight_candidate(
+    repo_path: Optional[Union[str, Path]], kind: str, summary: str, content: Dict[str, Any],
+    paths: Optional[List[str]] = None, *, semantic_role: str = "inference", record_id: Optional[str] = None,
+    experience: Optional[Dict[str, Any]] = None,
+    source: str = "cli",
+) -> Dict[str, Any]:
+    """Apply the existing candidate schema and secret/path rules without persistence."""
+
+    identity = _load_identity(repo_path)
+    candidate_id = _generate_candidate_id() if record_id is None else record_id
+    if source not in ("cli", "scheduled-ai"):
+        raise StorageError("invalid candidate source")
+    try:
+        if kind in ("strategy", "warning"):
+            if not isinstance(experience, dict):
+                raise StorageError("invalid experience payload")
+            return _build_experience_candidate_record(
+                identity, candidate_id=candidate_id, kind=kind, semantic_role=semantic_role,
+                summary=summary, content=content, paths=list(paths or []), experience=experience, source=source,
+            )
+        if experience is not None:
+            raise StorageError("invalid experience payload")
+        return _build_candidate_record(
+            identity, candidate_id=candidate_id, kind=kind, semantic_role=semantic_role,
+            summary=summary, content=content, paths=list(paths or []), source=source,
+        )
+    except (RecordValidationError, SecretScanError) as exc:
+        raise StorageError("invalid candidate payload") from exc
 
 
 def _validate_candidate_business_identity(candidate: Dict[str, Any], identity: Dict[str, str]) -> None:
@@ -1440,6 +1603,12 @@ __all__ = [
     "initialize_repository",
     "create_checkpoint",
     "create_candidate",
+    "preflight_candidate",
+    "load_scheduler_config",
+    "write_scheduler_config",
+    "enable_scheduler_config",
+    "disable_scheduler_config",
+    "checkout_identity_matches",
     "review_candidate",
     "render_continuity",
     "get_status",

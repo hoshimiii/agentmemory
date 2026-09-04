@@ -15,6 +15,8 @@ from .storage import (
     StoragePathError,
     create_checkpoint,
     create_candidate,
+    disable_scheduler_config,
+    enable_scheduler_config,
     review_candidate,
     render_continuity,
     get_status,
@@ -22,6 +24,13 @@ from .storage import (
     load_trusted_experiences,
 )
 from .render import render_experience_match
+from .schedule_runtime import (
+    ScheduleRuntimeError,
+    configure_schedule,
+    run_schedule,
+    schedule_plan,
+    schedule_status,
+)
 
 
 def _parse_content_json(raw: str) -> dict:
@@ -120,6 +129,22 @@ def _build_parser() -> argparse.ArgumentParser:
     retrieve.add_argument("--openviking-cli", dest="openviking_cli", required=True)
     retrieve.add_argument("--openviking-config", dest="openviking_config", required=True)
     retrieve.add_argument("--limit", type=int, choices=range(1, 6), default=3)
+
+    schedule = command.add_parser("schedule")
+    schedule_command = schedule.add_subparsers(dest="schedule_command", required=True)
+    configure = schedule_command.add_parser("configure")
+    configure.add_argument("--provider", required=True, choices=["codex", "claude", "gemini"])
+    configure.add_argument("--model", required=True)
+    configure.add_argument("--cron", required=True)
+    configure.add_argument("--timezone", default="local")
+    configure.add_argument("--reasoning-effort", choices=["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+    configure.add_argument("--enable", action="store_true")
+    schedule_command.add_parser("enable")
+    schedule_command.add_parser("disable")
+    schedule_command.add_parser("status")
+    schedule_command.add_parser("plan")
+    run_schedule_parser = schedule_command.add_parser("run")
+    run_schedule_parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -235,10 +260,32 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             _print_json(payload)
             return 0
 
+        if args.command == "schedule":
+            if args.schedule_command == "configure":
+                payload = configure_schedule(
+                    args.repo, provider=args.provider, model=args.model, cron=args.cron,
+                    timezone=args.timezone, reasoning_effort=args.reasoning_effort, enabled=args.enable,
+                )
+            elif args.schedule_command == "enable":
+                payload = enable_scheduler_config(args.repo)
+            elif args.schedule_command == "disable":
+                payload = disable_scheduler_config(args.repo)
+            elif args.schedule_command == "status":
+                payload = schedule_status(args.repo)
+            elif args.schedule_command == "plan":
+                payload = schedule_plan(args.repo)
+            elif args.schedule_command == "run":
+                payload = run_schedule(args.repo, dry_run=args.dry_run)
+            else:
+                _emit_error("error: invalid arguments")
+                return 2
+            _print_json(payload)
+            return 0
+
         _emit_error("error: unsupported command")
         return 2
 
-    except (OpenVikingError, RecordValidationError, StorageConflictError, StorageError, ValueError):
+    except (OpenVikingError, RecordValidationError, StorageConflictError, StorageError, ScheduleRuntimeError, ValueError):
         _emit_error("error: operation failed")
         return 1
 

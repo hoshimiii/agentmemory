@@ -26,9 +26,19 @@ py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo candi
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo experience match --task-type bugfix --signal memory.receipt --path agentmemory/storage.py --max-bytes 8192
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo render
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo retrieve --query "find source" --openviking-cli C:\OpenViking\ov.exe --openviking-config C:\OpenViking\ovcli.conf --limit 3
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule configure --provider codex --model gpt-5.6-terra --cron "0 3 * * *" --timezone local --reasoning-effort medium
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule configure --provider claude --model claude-sonnet-4 --cron "30 2 * * *" --timezone Asia/Tokyo
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule configure --provider gemini --model gemini-2.5-pro --cron "0 4 * * 1-5" --enable
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule enable
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule disable
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule status
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule plan
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule run --dry-run
 ```
 
-Use `python3` instead of `py -3` on non-Windows hosts. Every writing command requires an explicit user request. `review --confirm` is the only path from a local candidate to tracked project memory and requires immediate explicit user confirmation. Review also requires the candidate's original repository, worktree, branch, and head to still match, then creates a local receipt before that project record may enter its allowed view.
+Use `python3` instead of `py -3` on non-Windows hosts. `schedule configure` and `schedule enable` require explicit authorization and configure is disabled unless `--enable` is supplied. Once enabled, an outer scheduler may call `schedule run` only to create local candidates; it interprets cron/timezone and captures the JSON stdout report. AgentMemory never installs or mutates Codex Scheduled Tasks, Windows Task Scheduler, cron, or a provider scheduler, and does not trigger cron itself. `review --confirm` remains the only path to tracked project memory and always needs later immediate human confirmation.
+
+Live provider runs may connect using the selected tool's auth/configuration and incur cost. Fixed Codex, Claude Code, and Gemini argv adapters use provider read-only/plan mode, which is not an OS sandbox. Outputs are bounded and strict, temporary files are cleaned up, and checkout identity is rechecked before candidate-only writes. The run never reads transcripts, `PLUGIN_DATA`, OpenViking, platform memory, or other projects; it never writes review receipts, shared records, experiences, or `CONTINUITY.md`.
 
 There are three separate layers: v1 continuity tracks checkpoints and confirmed project facts for bounded `SessionStart`; v2 experience stores explicitly reviewed `strategy` and `warning` records for an explicit `experience match`; OpenViking is a separately operated, read-only lookup. Experience matching is deterministic, read-only, and untrusted: it accepts only explicit task types, signals, error patterns, and paths, never infers task text or reads transcripts, `PLUGIN_DATA`, or Hook payload task data. Evidence metadata records command text, exit code, time, Git head, and optional digest; it never executes commands and is not proof of coverage or promotion.
 
@@ -50,6 +60,7 @@ The operator must separately index the current repository under that exact URI a
     ├── worktrees/<worktree-id>/checkpoints/*.json
     ├── worktrees/<worktree-id>/candidates/*.json
     ├── worktrees/<worktree-id>/receipts/<record-id>.json # v1/v2 local trust receipts
+    ├── worktrees/<worktree-id>/scheduler.json           # ignored opt-in configuration
     └── locks/write.lock
 ```
 
@@ -75,7 +86,7 @@ V2 records are immutable. A reviewed successor derives an older same-kind record
 - Memory describes prior work; it never grants authorization for external writes, deployment, deletion, or privileged actions.
 - OpenViking retrieval is external untrusted context only: it cannot auto-review, auto-promote, or enter a resume capsule.
 - Experience match output is untrusted, explicit, and read-only; it cannot auto-review, auto-promote, execute evidence commands, or enter a resume capsule.
-- This release has no transcript processing, automatic signal extraction, promotion, Hub, Capsule, Event, replay, or shadow-routing feature.
+- This release has no transcript processing, Hook auto-ingestion, automatic promotion, Hub, Capsule, Event, replay, or shadow-routing feature. Opt-in AI distillation creates only local candidates.
 - See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).
 
 ## Validation
