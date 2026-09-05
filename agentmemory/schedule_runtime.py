@@ -107,18 +107,18 @@ def _run_provider(config: Mapping[str, Any], cwd: str) -> Any:
     paths: List[Path] = []
     process = None
     try:
-        for suffix in ("schema.json", "final.json", "stdout", "stderr"):
+        for suffix in ("schema.json", "final.json", "stdout"):
             handle = tempfile.NamedTemporaryFile(delete=False, suffix="." + suffix)
             handle.close()
             paths.append(Path(handle.name))
-        schema_path, final_path, stdout_path, stderr_path = paths
+        schema_path, final_path, stdout_path = paths
         schema_path.write_text(json.dumps(candidate_batch_schema(), separators=(",", ":")), encoding="utf-8")
-        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        with stdout_path.open("wb") as stdout:
             process = subprocess.Popen(_runtime_argv(config, executable, schema_path, final_path), cwd=cwd,
-                stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, shell=False)
+                stdin=subprocess.DEVNULL, stdout=stdout, stderr=subprocess.DEVNULL, shell=False)
             deadline = time.monotonic() + _TIMEOUT_SECONDS
             while process.poll() is None:
-                if any(path.stat().st_size > MAX_PROVIDER_OUTPUT_BYTES for path in (stdout_path, stderr_path, final_path)):
+                if any(path.stat().st_size > MAX_PROVIDER_OUTPUT_BYTES for path in (stdout_path, final_path)):
                     process.kill()
                     process.wait()
                     _error("provider execution failed")
@@ -129,7 +129,6 @@ def _run_provider(config: Mapping[str, Any], cwd: str) -> Any:
                 time.sleep(0.02)
         if process.returncode != 0:
             _error("provider execution failed")
-        _read_bounded(stderr_path)
         raw = _read_bounded(final_path) if config["provider"] == "codex" else _read_bounded(stdout_path)
         return extract_provider_payload(config["provider"], raw)
     except (OSError, SchedulerValidationError, ScheduleRuntimeError) as exc:

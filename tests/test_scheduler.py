@@ -513,9 +513,9 @@ class SchedulerRuntimeTests(unittest.TestCase):
             self.assertIsInstance(captured["argv"], list)
             self.assertFalse(captured["kwargs"]["shell"])
             self.assertIs(captured["kwargs"]["stdin"], subprocess.DEVNULL)
+            self.assertIs(captured["kwargs"]["stderr"], subprocess.DEVNULL)
             temp_paths = [
                 Path(captured["kwargs"]["stdout"].name),
-                Path(captured["kwargs"]["stderr"].name),
                 Path(captured["argv"][captured["argv"].index("--output-schema") + 1]),
                 Path(captured["argv"][captured["argv"].index("--output-last-message") + 1]),
             ]
