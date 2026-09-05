@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -58,7 +59,9 @@ def schedule_status(repo_path: Optional[str]) -> Dict[str, Any]:
 def _executable(provider: str) -> Optional[str]:
     if provider not in PROVIDERS:
         return None
-    found = shutil.which(provider)
+    found = shutil.which(provider + ".exe") if os.name == "nt" else shutil.which(provider)
+    if os.name == "nt" and (not found or Path(found).suffix.lower() != ".exe"):
+        return None
     return str(Path(found).absolute()) if found else None
 
 

@@ -94,9 +94,10 @@ agentmemory --repo <repo> schedule run [--dry-run]
 所有 adapter：
 
 - 使用 `subprocess` argv，不通过 `shell=True`；model 只能作为已验证的独立参数，reasoning override 只能由固定键与枚举值构造。
-- executable 必须由 `shutil.which()` 解析为绝对路径后调用；这降低 PATH 漂移风险，但不证明该可执行文件来自官方发布者。
+- executable 必须由 `shutil.which()` 解析为绝对路径后调用；Windows 只查询并接受 `${provider}.exe`，拒绝 `.cmd`、`.bat`、`.ps1` 和无扩展名包装器，不回退到 shell 或 `cmd.exe`。这降低 PATH 漂移与脚本包装器解释 prompt 的风险，但不证明该可执行文件来自官方发布者。
 - cwd 固定为当前仓库根。
 - executable 从 PATH 解析；找不到时返回不泄露环境的失败报告。
+- 因此 Windows 上未提供原生 `.exe` 的 Claude 或 Gemini 会被视为不可用；这是 fail-closed 行为。
 - stdout、stderr 和 Codex final-output 使用临时文件与运行期大小监测；设置有限超时和输出字节上限。超时、非零退出、非法 UTF-8、超限或非法 JSON 都不得写 candidate，临时文件必须在 `finally` 清理。
 - read-only/plan 是被选 provider CLI 提供的安全边界，不是 AgentMemory 提供的 OS/内核沙箱；provider 仍可能读取其自身配置或进行模型 API 通信。
 

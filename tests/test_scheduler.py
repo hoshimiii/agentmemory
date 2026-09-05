@@ -418,6 +418,17 @@ class SchedulerRuntimeTests(unittest.TestCase):
                 with self.assertRaises(ScheduleRuntimeError):
                     run_schedule(str(repo))
 
+    def test_windows_provider_requires_native_executable(self):
+        from agentmemory import schedule_runtime
+        with mock.patch.object(schedule_runtime.os, "name", "nt"), \
+             mock.patch.object(schedule_runtime.shutil, "which", return_value="C:/tools/codex.exe") as which:
+            self.assertEqual(schedule_runtime._executable("codex"), str(Path("C:/tools/codex.exe").absolute()))
+            which.assert_called_once_with("codex.exe")
+        with mock.patch.object(schedule_runtime.os, "name", "nt"), \
+             mock.patch.object(schedule_runtime.shutil, "which", return_value="C:/npm/codex.CMD") as which:
+            self.assertIsNone(schedule_runtime._executable("codex"))
+            which.assert_called_once_with("codex.exe")
+
     def test_six_proposals_and_checkout_change_write_no_candidates(self):
         for change_head in (False, True):
             with self.subTest(change_head=change_head), tempfile.TemporaryDirectory() as directory:
