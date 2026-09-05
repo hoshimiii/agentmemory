@@ -19,6 +19,19 @@ def _retrieval_payload():
     return {"source": "experience", "query_digest": "a" * 64, "result_ids": ["mem-1"], "ranks": [0], "scores": [None], "lifecycle": "active", "filter": "project", "activated_relation_count": 1, "byte_budget": 8192, "byte_count": 1, "omitted_count": 0}
 
 
+def _sized_event(line_bytes):
+    base = {"schema_version": 1, "event_id": "evt-size", "correlation_id": "cor-size", "event_type": "retrieval",
+            "observed_at": "2026-01-01T00:00:00Z", "repository_id": "repo", "worktree_id": "worktree",
+            "branch": "main", "head": "head", "candidate_id": None, "record_id": None, "memory_id": None}
+    for count in range(128):
+        for length in range(1, 129):
+            ids = ["m"] * count + ["m" * length]
+            event = {**base, "payload": {**_retrieval_payload(), "result_ids": ids, "ranks": list(range(len(ids))), "scores": [None] * len(ids)}}
+            if len(observability.canonical_json_dumps(event).encode("utf-8")) + 1 == line_bytes:
+                return event
+    raise AssertionError("unable to construct exact event size")
+
+
 class ObservabilityTests(unittest.TestCase):
     def _cli_raw(self, *argv):
         output = io.StringIO()
@@ -94,9 +107,13 @@ class ObservabilityTests(unittest.TestCase):
             observability.configure(repo, enabled=True)
             events = path.parent / "observability" / "events.jsonl"
             events.parent.mkdir(exist_ok=True)
-            events.write_bytes(b"x" * (observability.MAX_LOG_BYTES + observability.MAX_EVENT_BYTES + 1))
+            oversized = b"x" * (observability.MAX_LOG_BYTES + 1)
+            events.write_bytes(oversized)
             with self.assertRaises(ObservabilityError):
                 observability.export(repo)
+            with self.assertRaises(ObservabilityError):
+                observability.delete(repo, confirm=True, all_events=True)
+            self.assertEqual(events.read_bytes(), oversized)
             event = {"schema_version": 1, "event_id": "bad id", "correlation_id": "cor-ok", "event_type": "retrieval", "observed_at": "2026-01-01T00:00:00Z", "repository_id": "a", "worktree_id": "b", "branch": "main", "head": "c", "candidate_id": None, "record_id": None, "memory_id": None, "payload": _retrieval_payload()}
             with self.assertRaises(ObservabilityError):
                 observability.validate_event(event)
@@ -110,6 +127,73 @@ class ObservabilityTests(unittest.TestCase):
             event["branch"] = "bad\x01branch"
             with self.assertRaises(ObservabilityError):
                 observability.validate_event(event)
+
+    def test_physical_event_and_store_bounds_are_exact(self):
+        directory, repo = self._initialized()
+        with directory, mock.patch.object(observability, "MAX_EVENT_BYTES", 1024), mock.patch.object(observability, "MAX_LOG_BYTES", 2048):
+            observability.configure(repo, enabled=True)
+            _, _, paths = observability._layout(repo)
+            exact = _sized_event(1024)
+            self.assertEqual(len(observability.canonical_json_dumps(exact).encode("utf-8")) + 1, 1024)
+            self.assertEqual(observability.validate_event(exact)["event_id"], "evt-size")
+            too_large = _sized_event(1025)
+            with self.assertRaises(ObservabilityError):
+                observability.validate_event(too_large)
+            paths["directory"].mkdir(parents=True, exist_ok=True)
+            paths["events"].write_bytes((observability.canonical_json_dumps(exact) + "\n").encode("utf-8"))
+            self.assertEqual(observability._read_events(paths)[0]["event_id"], "evt-size")
+            for index in range(12):
+                self.assertTrue(observability.emit(repo, event_type="retrieval", correlation_id="cor-{}".format(index), memory_id="mem-{}".format(index), payload=_retrieval_payload()))
+            self.assertLessEqual(paths["events"].stat().st_size, observability.MAX_LOG_BYTES)
+
+    def test_observability_lock_and_atomic_write_revalidate_swaps(self):
+        directory, repo = self._initialized()
+        with directory:
+            observability.configure(repo, enabled=True)
+            _, _, paths = observability._layout(repo)
+            self.assertEqual(paths["lock"].parent.name, "locks")
+            self.assertNotEqual(paths["lock"].parent, paths["directory"])
+            outside = Path(directory.name) / "outside"
+            outside.mkdir()
+            real_lock = observability.FileLock
+
+            class SwapDirectoryLock:
+                def __init__(self, *args, **kwargs):
+                    self.lock = real_lock(*args, **kwargs)
+
+                def __enter__(self):
+                    paths["directory"].symlink_to(outside, target_is_directory=True)
+                    return self.lock.__enter__()
+
+                def __exit__(self, *args):
+                    return self.lock.__exit__(*args)
+
+            try:
+                with mock.patch.object(observability, "FileLock", SwapDirectoryLock):
+                    self.assertFalse(observability.emit(repo, event_type="retrieval", payload=_retrieval_payload()))
+            except OSError as exc:
+                self.skipTest("symlink unavailable ({})".format(exc))
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertTrue(paths["lock"].exists())
+            paths["directory"].unlink()
+
+            paths["directory"].mkdir()
+            real_validate = observability._validate_within_root
+            swapped = False
+
+            def swap_before_replace(root, target, *, target_is_file):
+                nonlocal swapped
+                if target == paths["events"] and target_is_file and not swapped and list(paths["directory"].glob(".o.*.tmp")):
+                    paths["events"].symlink_to(outside / "events.jsonl")
+                    swapped = True
+                return real_validate(root, target, target_is_file=target_is_file)
+
+            with mock.patch.object(observability, "_validate_within_root", side_effect=swap_before_replace):
+                self.assertFalse(observability.emit(repo, event_type="retrieval", payload=_retrieval_payload()))
+            self.assertTrue(swapped)
+            self.assertFalse((outside / "events.jsonl").exists())
+            self.assertTrue(paths["events"].is_symlink())
+            paths["events"].unlink()
 
     def test_bounds_retention_and_deterministic_report(self):
         directory, repo = self._initialized()
@@ -144,6 +228,8 @@ class ObservabilityTests(unittest.TestCase):
         directory, repo = self._initialized()
         with directory:
             observability.configure(repo, enabled=True)
+            with self.assertRaises(ObservabilityError):
+                observability.annotate_outcome(repo, correlation_id="cor-missing", confirm=True, used_by_agent=True, affected_decision=None, task_success=True, user_corrections=0, retries=0, turns=1, tool_calls=1, token_cost=None)
             self.assertTrue(observability.emit(repo, event_type="injection", correlation_id="cor-2", payload={"memory_ids": ["mem-1"], "order": [0], "bytes": 1, "budget": 2, "truncated": False, "conflict_reason": None}))
             self.assertTrue(observability.annotate_outcome(repo, correlation_id="cor-2", confirm=True, used_by_agent=True, affected_decision=None, task_success=True, user_corrections=0, retries=0, turns=1, tool_calls=1, token_cost=None))
             self.assertEqual(observability.export(repo)["events"][-1]["event_type"], "outcome")
@@ -177,10 +263,22 @@ class ObservabilityTests(unittest.TestCase):
             events = observability.export(repo)["events"]
             self.assertEqual([item["event_type"] for item in events], ["write_attempt", "write_result"])
             self.assertEqual(events[0]["correlation_id"], events[1]["correlation_id"])
+            self.assertEqual(events[0]["record_id"], "cp-observe")
             self.assertEqual(events[1]["record_id"], "cp-observe")
             correlation = events[0]["correlation_id"]
             args = ("--repo", str(repo), "observability", "outcome", "annotate", "--correlation-id", correlation, "--used-by-agent", "unknown", "--affected-decision", "false", "--task-success", "true", "--confirm")
             self.assertEqual(self._cli(*args)[0], 0)
+
+    def test_cli_known_id_survives_failed_write_trace(self):
+        directory, repo = self._initialized()
+        with directory:
+            self.assertEqual(self._cli("--repo", str(repo), "observability", "enable")[0], 0)
+            command = ("--repo", str(repo), "candidate", "propose", "--kind", "decision", "--summary", "candidate", "--content-json", "{}", "--id", "cand-failure")
+            with redirect_stderr(io.StringIO()), mock.patch("agentmemory.cli.create_candidate", side_effect=StorageError("failed")):
+                self.assertEqual(self._cli(*command)[0], 1)
+            events = observability.export(repo)["events"]
+            self.assertEqual([event["candidate_id"] for event in events], ["cand-failure", "cand-failure"])
+            self.assertEqual(events[-1]["payload"]["status"], "failure")
 
     def test_cli_observability_export_report_and_confirmed_delete(self):
         directory, repo = self._initialized()
@@ -212,15 +310,15 @@ class ObservabilityTests(unittest.TestCase):
             run.assert_called_once_with(str(repo), dry_run=True)
             self.assertEqual(observability.export(repo)["events"], [])
 
-            mixed = {"candidates": [{"id": "cand-scheduled"}], "rejected_count": 1}
+            mixed = {"candidates": [{"id": "cand-created", "kind": "decision", "created": True, "idempotent": False}, {"id": "cand-idempotent", "kind": "warning", "created": False, "idempotent": True}], "rejected_count": 1}
             with mock.patch("agentmemory.cli.run_schedule", return_value=mixed) as run:
                 self.assertEqual(self._cli(*command), (0, mixed))
             run.assert_called_once_with(str(repo), dry_run=False)
             events = observability.export(repo)["events"]
-            self.assertEqual([event["event_type"] for event in events], ["write_attempt", "write_result"])
-            self.assertEqual(events[0]["correlation_id"], events[1]["correlation_id"])
-            self.assertEqual(events[1]["payload"]["status"], "success")
-            self.assertIsNone(events[1]["payload"]["reason"])
+            self.assertEqual([event["event_type"] for event in events], ["write_attempt", "write_result", "write_result", "write_result"])
+            self.assertEqual({event["correlation_id"] for event in events}, {events[0]["correlation_id"]})
+            self.assertEqual([(event["candidate_id"], event["payload"]["kind"], event["payload"]["status"]) for event in events[1:]], [("cand-created", "decision", "created"), ("cand-idempotent", "warning", "idempotent"), (None, None, "rejected")])
+            self.assertEqual(events[-1]["payload"]["reason"], "invalid")
 
             observability.delete(repo, confirm=True, all_events=True)
             rejected = {"candidates": [], "rejected_count": 2}
@@ -234,6 +332,13 @@ class ObservabilityTests(unittest.TestCase):
             self.assertEqual(result["payload"]["status"], "rejected")
             self.assertEqual(result["payload"]["reason"], "invalid")
 
+            observability.delete(repo, confirm=True, all_events=True)
+            with mock.patch("agentmemory.cli.run_schedule", return_value={"candidates": [], "rejected_count": 0}):
+                self.assertEqual(self._cli(*command), (0, {"candidates": [], "rejected_count": 0}))
+            empty_events = observability.export(repo)["events"]
+            self.assertEqual([event["event_type"] for event in empty_events], ["write_attempt", "write_result"])
+            self.assertEqual(empty_events[-1]["payload"]["status"], "success")
+
     def test_cli_candidate_and_review_write_result_ids_and_status(self):
         directory, repo = self._initialized()
         with directory:
@@ -241,12 +346,15 @@ class ObservabilityTests(unittest.TestCase):
             candidate = self._cli("--repo", str(repo), "candidate", "propose", "--kind", "decision", "--summary", "candidate", "--content-json", "{}", "--id", "cand-observe")[1]
             candidate_events = observability.export(repo)["events"]
             self.assertEqual(candidate_events[0]["correlation_id"], candidate_events[1]["correlation_id"])
+            self.assertEqual(candidate_events[0]["candidate_id"], candidate["id"])
             self.assertEqual(candidate_events[1]["candidate_id"], candidate["id"])
             self.assertEqual(candidate_events[1]["payload"]["status"], "created")
 
             reviewed = self._cli("--repo", str(repo), "review", "--candidate", candidate["id"], "--confirm")[1]
             review_events = observability.export(repo)["events"][-2:]
             self.assertEqual(review_events[0]["correlation_id"], review_events[1]["correlation_id"])
+            self.assertEqual(review_events[0]["candidate_id"], candidate["id"])
+            self.assertEqual(review_events[1]["candidate_id"], candidate["id"])
             self.assertEqual(review_events[1]["record_id"], reviewed["id"])
             self.assertEqual(review_events[1]["payload"]["status"], "success")
 

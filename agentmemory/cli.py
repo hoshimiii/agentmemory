@@ -183,20 +183,23 @@ def _nullable_bool(value: str) -> Any:
     return {"true": True, "false": False, "unknown": None}[value]
 
 
-def _trace_write(repo: Optional[str], *, operation: str, trigger: str, source: str, kind: Optional[str], scope: str, identity_field: Optional[str], action: Any) -> Any:
+def _trace_write(repo: Optional[str], *, operation: str, trigger: str, source: str, kind: Optional[str], scope: str,
+                 initial_ids: Optional[dict], identity_field: Optional[str], action: Any) -> Any:
     correlation = observability.new_correlation_id()
     base = {"operation": operation, "trigger": trigger, "source": source, "kind": kind, "scope": scope}
-    observability.emit(repo, event_type="write_attempt", correlation_id=correlation, payload=base)
+    identifiers = dict(initial_ids or {})
+    observability.emit(repo, event_type="write_attempt", correlation_id=correlation, payload=base, **identifiers)
     try:
         result = action()
     except StorageConflictError:
-        observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "conflict"})
+        observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "conflict"}, **identifiers)
         raise
     except (StorageError, RecordValidationError, ValueError):
-        observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "storage_failure"})
+        observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "storage_failure"}, **identifiers)
         raise
     status = "success" if operation == "review" else ("created" if result.get("created", True) else "idempotent")
-    identifiers = {identity_field: result["id"]} if identity_field and isinstance(result.get("id"), str) else {}
+    if identity_field and isinstance(result.get("id"), str):
+        identifiers[identity_field] = result["id"]
     observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": status, "reason": None}, **identifiers)
     return result
 
@@ -274,7 +277,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 _emit_error("error: invalid content-json")
                 return 2
 
-            payload = _trace_write(args.repo, operation="checkpoint", trigger="cli", source="cli", kind="checkpoint", scope="local", identity_field="record_id", action=lambda: create_checkpoint(args.repo, summary=args.summary, content=content, paths=args.path, record_id=args.id))
+            payload = _trace_write(args.repo, operation="checkpoint", trigger="cli", source="cli", kind="checkpoint", scope="local", initial_ids={"record_id": args.id} if args.id else None, identity_field="record_id", action=lambda: create_checkpoint(args.repo, summary=args.summary, content=content, paths=args.path, record_id=args.id))
             payload["created"] = bool(payload.get("created", True))
             _print_json(payload)
             return 0
@@ -300,7 +303,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     return 2
                 else:
                     experience = None
-                payload = _trace_write(args.repo, operation="candidate", trigger="cli", source="cli", kind=args.kind, scope="local", identity_field="candidate_id", action=lambda: create_candidate(args.repo, kind=args.kind, summary=args.summary, content=content, paths=args.path, semantic_role=args.semantic_role, record_id=args.id, experience=experience))
+                payload = _trace_write(args.repo, operation="candidate", trigger="cli", source="cli", kind=args.kind, scope="local", initial_ids={"candidate_id": args.id} if args.id else None, identity_field="candidate_id", action=lambda: create_candidate(args.repo, kind=args.kind, summary=args.summary, content=content, paths=args.path, semantic_role=args.semantic_role, record_id=args.id, experience=experience))
                 payload["created"] = bool(payload.get("created", True))
                 _print_json(payload)
                 return 0
@@ -309,7 +312,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             return 2
 
         if args.command == "review":
-            payload = _trace_write(args.repo, operation="review", trigger="cli", source="explicit-review", kind=None, scope="project", identity_field="record_id", action=lambda: review_candidate(args.repo, candidate_id=args.candidate_id))
+            payload = _trace_write(args.repo, operation="review", trigger="cli", source="explicit-review", kind=None, scope="project", initial_ids={"candidate_id": args.candidate_id}, identity_field="record_id", action=lambda: review_candidate(args.repo, candidate_id=args.candidate_id))
             _print_json(payload)
             return 0
 
@@ -370,9 +373,28 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     except Exception:
                         observability.emit(args.repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "storage_failure"})
                         raise
-                    rejected = payload.get("rejected_count", 0)
-                    succeeded = bool(payload.get("candidates"))
-                    observability.emit(args.repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "rejected" if rejected and not succeeded else "success", "reason": "invalid" if rejected and not succeeded else None})
+                    candidates = payload.get("candidates", [])
+                    emitted = 0
+                    if isinstance(candidates, list):
+                        for candidate in candidates:
+                            if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str) or candidate.get("kind") not in ("decision", "incident", "constraint", "strategy", "warning"):
+                                continue
+                            if candidate.get("created") is True:
+                                status = "created"
+                            elif candidate.get("idempotent") is True or candidate.get("created") is False:
+                                status = "idempotent"
+                            else:
+                                continue
+                            observability.emit(args.repo, event_type="write_result", correlation_id=correlation,
+                                               candidate_id=candidate["id"],
+                                               payload={**base, "kind": candidate["kind"], "status": status, "reason": None})
+                            emitted += 1
+                    if payload.get("rejected_count", 0):
+                        observability.emit(args.repo, event_type="write_result", correlation_id=correlation,
+                                           payload={**base, "status": "rejected", "reason": "invalid"})
+                    elif not emitted:
+                        observability.emit(args.repo, event_type="write_result", correlation_id=correlation,
+                                           payload={**base, "status": "success", "reason": None})
             else:
                 _emit_error("error: invalid arguments")
                 return 2

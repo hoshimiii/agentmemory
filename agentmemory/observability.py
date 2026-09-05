@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import secrets
 import tempfile
@@ -15,7 +14,7 @@ from .locking import FileLock
 from .schema import canonical_json_dumps
 from .scheduler import SchedulerValidationError, parse_strict_json
 from .security import SecretScanError, scan_for_secrets
-from .storage import StorageError, _ensure_initialized_for_checkpoint, _load_identity, _resolve_layout, _validate_path_set, _validate_within_root
+from .storage import _ensure_initialized_for_checkpoint, _load_identity, _resolve_layout, _validate_path_set, _validate_within_root
 
 
 OBSERVABILITY_SCHEMA_VERSION = 1
@@ -87,7 +86,8 @@ def _layout(repo_path: Optional[Union[str, Path]]) -> tuple[Dict[str, str], Dict
     root = base["repo_root"]
     directory = root / ".continuity" / "local" / "worktrees" / identity["worktree_id"] / "observability"
     result = {"config": base["repo_root"] / ".continuity" / "local" / "worktrees" / identity["worktree_id"] / "observability.json",
-              "directory": directory, "events": directory / "events.jsonl", "lock": directory / "write.lock"}
+              "directory": directory, "events": directory / "events.jsonl",
+              "lock": base["local"] / "locks" / ("observability-" + identity["worktree_id"] + ".lock")}
     _validate_path_set(base, root)
     _validate_observability_paths(base, result)
     return identity, base, result
@@ -114,8 +114,9 @@ def _validate_config(value: Any, identity: Mapping[str, Any]) -> Dict[str, Any]:
     return _config(identity, value["enabled"])
 
 
-def _atomic_write(path: Path, text: str) -> None:
+def _atomic_write(root: Path, path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_within_root(root, path, target_is_file=True)
     fd, name = tempfile.mkstemp(dir=str(path.parent), prefix=".o.", suffix=".tmp")
     temporary = Path(name)
     try:
@@ -123,6 +124,7 @@ def _atomic_write(path: Path, text: str) -> None:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
+        _validate_within_root(root, path, target_is_file=True)
         os.replace(str(temporary), str(path))
     finally:
         if temporary.exists():
@@ -147,9 +149,10 @@ def configure(repo_path: Optional[Union[str, Path]], *, enabled: bool) -> Dict[s
     identity, base, paths = _layout(repo_path)
     value = _config(identity, enabled)
     _ensure_initialized_for_checkpoint(base, base["repo_root"])
+    _validate_observability_paths(base, paths)
     with FileLock(paths["lock"]):
         _validate_observability_paths(base, paths)
-        _atomic_write(paths["config"], canonical_json_dumps(value))
+        _atomic_write(base["repo_root"], paths["config"], canonical_json_dumps(value))
     return value
 
 
@@ -214,7 +217,7 @@ def validate_event(event: Any) -> Dict[str, Any]:
         rendered = canonical_json_dumps(value)
     except Exception as exc:
         raise ObservabilityError("invalid observability event") from exc
-    if len(rendered.encode("utf-8")) > MAX_EVENT_BYTES:
+    if len(rendered.encode("utf-8")) + 1 > MAX_EVENT_BYTES:
         _fail("observability event exceeds limit")
     return value
 
@@ -223,14 +226,16 @@ def _read_events(paths: Mapping[str, Path]) -> List[Dict[str, Any]]:
     if not paths["events"].exists():
         return []
     try:
-        if paths["events"].stat().st_size > MAX_LOG_BYTES + MAX_EVENT_BYTES:
+        if paths["events"].stat().st_size > MAX_LOG_BYTES:
             _fail("invalid observability event store")
         with paths["events"].open("rb") as stream:
-            encoded = stream.read(MAX_LOG_BYTES + MAX_EVENT_BYTES + 1)
-        if len(encoded) > MAX_LOG_BYTES + MAX_EVENT_BYTES:
+            encoded = stream.read(MAX_LOG_BYTES + 1)
+        if len(encoded) > MAX_LOG_BYTES:
             _fail("invalid observability event store")
-        rows = encoded.decode("utf-8", "strict").splitlines()
-        return [validate_event(parse_strict_json(row, max_bytes=MAX_EVENT_BYTES)) for row in rows if row]
+        rows = encoded.splitlines(keepends=True)
+        if any(len(row) > MAX_EVENT_BYTES or not row.endswith(b"\n") for row in rows):
+            _fail("invalid observability event store")
+        return [validate_event(parse_strict_json(row[:-1].decode("utf-8", "strict"), max_bytes=MAX_EVENT_BYTES)) for row in rows if row]
     except (OSError, UnicodeError, SchedulerValidationError, ObservabilityError) as exc:
         raise ObservabilityError("invalid observability event store") from exc
 
@@ -248,6 +253,24 @@ def _compact(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return list(reversed(kept))
 
 
+def _event(identity: Mapping[str, Any], *, event_type: str, payload: Mapping[str, Any], correlation_id: Optional[str],
+           candidate_id: Optional[str], record_id: Optional[str], memory_id: Optional[str]) -> Dict[str, Any]:
+    return validate_event({"schema_version": OBSERVABILITY_SCHEMA_VERSION, "event_id": "evt-" + secrets.token_hex(16),
+        "correlation_id": correlation_id or "cor-" + secrets.token_hex(16), "event_type": event_type, "observed_at": _timestamp_utc(),
+        "repository_id": identity["repository_id"], "worktree_id": identity["worktree_id"], "branch": identity["branch"], "head": identity["head"],
+        "candidate_id": candidate_id, "record_id": record_id, "memory_id": memory_id, "payload": dict(payload)})
+
+
+def _append_event(base: Mapping[str, Path], paths: Mapping[str, Path], event: Mapping[str, Any], events: Optional[List[Dict[str, Any]]] = None) -> None:
+    appended = _compact(_read_events(paths) if events is None else events)
+    appended.append(dict(event))
+    appended = _compact(appended)
+    text = "".join(canonical_json_dumps(item) + "\n" for item in appended)
+    if len(text.encode("utf-8")) > MAX_LOG_BYTES:
+        _fail("observability event store exceeds limit")
+    _atomic_write(base["repo_root"], paths["events"], text)
+
+
 def emit(repo_path: Optional[Union[str, Path]], *, event_type: str, payload: Mapping[str, Any], correlation_id: Optional[str] = None, candidate_id: Optional[str] = None, record_id: Optional[str] = None, memory_id: Optional[str] = None) -> bool:
     """Best-effort automatic emission; observability failures never escape."""
     try:
@@ -255,17 +278,16 @@ def emit(repo_path: Optional[Union[str, Path]], *, event_type: str, payload: Map
         config = load_config(repo_path)
         if config is None or not config["enabled"]:
             return False
-        event = validate_event({"schema_version": OBSERVABILITY_SCHEMA_VERSION, "event_id": "evt-" + secrets.token_hex(16),
-            "correlation_id": correlation_id or "cor-" + secrets.token_hex(16), "event_type": event_type, "observed_at": _timestamp_utc(),
-            "repository_id": identity["repository_id"], "worktree_id": identity["worktree_id"], "branch": identity["branch"], "head": identity["head"],
-            "candidate_id": candidate_id, "record_id": record_id, "memory_id": memory_id, "payload": dict(payload)})
+        event = _event(identity, event_type=event_type, payload=payload, correlation_id=correlation_id,
+                       candidate_id=candidate_id, record_id=record_id, memory_id=memory_id)
+        _, base, paths = _layout(repo_path)
+        _validate_observability_paths(base, paths)
         with FileLock(paths["lock"], timeout=0.1):
-            _, base, _ = _layout(repo_path)
             _validate_observability_paths(base, paths)
-            events = _compact(_read_events(paths))
-            events.append(event)
-            events = _compact(events)
-            _atomic_write(paths["events"], "".join(canonical_json_dumps(item) + "\n" for item in events))
+            current = load_config(repo_path)
+            if current is None or not current["enabled"]:
+                return False
+            _append_event(base, paths, event)
         return True
     except Exception:
         return False
@@ -277,6 +299,7 @@ def export(repo_path: Optional[Union[str, Path]], *, since: Optional[str] = None
     config = load_config(repo_path)
     if config is None:
         return {"enabled": False, "events": []}
+    _validate_observability_paths(base, paths)
     with FileLock(paths["lock"]):
         _validate_observability_paths(base, paths)
         events = _read_events(paths)
@@ -313,11 +336,23 @@ def annotate_outcome(repo_path: Optional[Union[str, Path]], *, correlation_id: s
         _fail("outcome annotation requires confirmation")
     if not _OPAQUE_ID_RE.fullmatch(correlation_id):
         _fail("outcome annotation requires confirmation")
+    identity, base, paths = _layout(repo_path)
+    _ensure_initialized_for_checkpoint(base, base["repo_root"])
     config = load_config(repo_path)
     if config is None or not config["enabled"]:
         _fail("observability is disabled")
-    if not emit(repo_path, event_type="outcome", correlation_id=correlation_id, payload={"source": "human", **outcome}):
-        _fail("outcome annotation failed")
+    event = _event(identity, event_type="outcome", correlation_id=correlation_id, payload={"source": "human", **outcome},
+                   candidate_id=None, record_id=None, memory_id=None)
+    _validate_observability_paths(base, paths)
+    with FileLock(paths["lock"]):
+        _validate_observability_paths(base, paths)
+        current = load_config(repo_path)
+        if current is None or not current["enabled"]:
+            _fail("observability is disabled")
+        events = _read_events(paths)
+        if not any(item["correlation_id"] == correlation_id for item in events):
+            _fail("unknown outcome correlation")
+        _append_event(base, paths, event, events)
     return True
 
 
@@ -328,9 +363,10 @@ def delete(repo_path: Optional[Union[str, Path]], *, confirm: bool, all_events: 
         _parse_date(before)
     _, base, paths = _layout(repo_path)
     _ensure_initialized_for_checkpoint(base, base["repo_root"])
+    _validate_observability_paths(base, paths)
     with FileLock(paths["lock"]):
         _validate_observability_paths(base, paths)
         events = _read_events(paths)
         retained = [] if all_events else [event for event in events if event["observed_at"][:10] >= before]
-        _atomic_write(paths["events"], "".join(canonical_json_dumps(item) + "\n" for item in retained))
+        _atomic_write(base["repo_root"], paths["events"], "".join(canonical_json_dumps(item) + "\n" for item in retained))
     return len(events) - len(retained)
