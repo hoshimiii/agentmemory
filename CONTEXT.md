@@ -2,67 +2,69 @@
 
 ## Current Brief
 
-This turn's only goal: finish and verify the opt-in scheduled AI candidate-distillation slot, document the next observability requirements without implementing telemetry, and prove the plugin can be isolated in a sandbox Codex home.
+This turn's only goal: implement and verify the smallest project-scoped M10 observability loop needed to trace memory writes, retrieval, injection, and explicitly annotated outcomes without weakening AgentMemory's review boundary.
 
 ### Deliverables
 
-- Add a worktree-local scheduler configuration with an explicit `enabled` switch, provider, model, cron expression, timezone label, and bounded provider options.
-- Add fixed adapters for Codex CLI, Claude Code, and Gemini CLI; adapters use argument arrays without shell interpolation and run the selected AI in a read-only analysis mode.
-- Add `schedule configure`, `enable`, `disable`, `status`, `plan`, and `run` commands. `plan` is read-only; `run` refuses disabled or malformed configuration.
-- Have `schedule run` request a strict, bounded candidate batch, validate it through the existing candidate path, create at most five local candidates, and return a human-review report. It must never call review or write shared memory.
-- Produce one final-state requirements document and focused tests covering configuration, cron validation, adapter rendering, provider-output parsing, candidate-only writes, failure handling, and compatibility.
-- Add a bounded M10 requirements section for end-to-end write/retrieval/injection/outcome traceability and counterfactual usefulness experiments; do not implement it in M9.
-- Install the current plugin package only into an isolated temporary Codex home and validate discovery/configuration without a paid provider run.
+- Add an identity-bound, worktree-local `observability.enabled` switch that defaults off and is independent of the scheduler switch.
+- Append bounded, privacy-minimized JSONL events for existing write, retrieval, and SessionStart injection boundaries; tracing is best effort and must never change the primary operation's result.
+- Add explicit CLI operations to enable, disable, inspect, export, summarize, annotate an observed outcome, and confirm trace deletion.
+- Correlate stages with locally generated opaque IDs and existing candidate/record IDs when available; never store prompts, memory content, provider output, environment values, raw session IDs, or hidden reasoning.
+- Trace the existing deterministic relation-aware `experience match` budget, which grows from 8 KiB to a 24 KiB hard cap as trusted warning/strategy relations activate; do not mislabel retrieval-only output as SessionStart injection.
+- Produce a deterministic daily JSON report that exposes event counts, write results, retrieval/injection coverage, explicit outcomes, and data-chain gaps for human review; it must not review, promote, delete, or infer usefulness.
+- Preserve the documented four-arm counterfactual protocol as a later experiment runner; M10 collects the evidence needed for it but does not automate model experiments.
 
 ### Non-goals
 
-- No automatic review, receipt creation, durable-memory promotion, lifecycle mutation, deletion, or shared-memory write.
-- No transcript, `transcript_path`, `PLUGIN_DATA`, hidden reasoning, platform memory, OpenViking, cross-project aggregation, or browser-extension input.
-- No scheduler installation, Codex automation creation, Windows Task Scheduler/cron mutation, real-host plugin installation, merge, push, release, or deployment in this phase.
-- No observability trace writer, report database, telemetry service, automatic usefulness inference, or M10 runtime code.
-- No provider plugin discovery, arbitrary shell templates, stored credentials, daemon, UI, remote Hub, replay evaluator, or shadow promotion.
+- No automatic review, promotion, receipt creation, lifecycle mutation, shared-memory write, or memory deletion.
+- No raw conversation, transcript, prompt, provider stdout/stderr, memory body, filesystem path, environment value, credential, hidden reasoning, or cross-project aggregation in trace data.
+- No database, daemon, service, UI, remote telemetry, public Hub, automatic evaluator, experiment runner, causal inference, or scheduler installation.
+- No change to v1/v2 record schemas, trust receipts, OpenViking query behavior, candidate limits, or provider adapters.
+- No merge, push, release, external scheduler mutation, or destructive cleanup in this phase.
 
 ### Settled Contracts
 
-- Enabling the schedule is standing authorization to create reviewable local candidates only. `review --confirm` remains the sole promotion route and still needs immediate explicit human confirmation.
-- Configuration lives under `.continuity/local/worktrees/<worktree-id>/scheduler.json`, remains ignored, embeds the expected repository/worktree identity, contains no credentials, and uses atomic locked writes.
-- Canonical scheduling input is a validated POSIX-style five-field numeric cron expression. Seconds, macros, Quartz tokens, names, and provider-native recurrence syntax are outside M9; an outer scheduler consumes the returned plan.
-- Providers are a closed registry: `codex`, `claude`, and `gemini`. The configured model is passed as one argument. Codex may also receive a validated reasoning effort.
-- The AI process gets a strict JSON proposal contract and provider-enforced read-only repository access. AgentMemory, not the AI process, performs candidate writes after strict adapter-specific parsing and a post-run identity check.
-- One run accepts at most five proposals and bounded output, deduplicates identical proposals, and rejects a checkout change before any write. Candidate IDs are deterministic for repository identity, current head, and normalized proposal so retries on unchanged evidence are idempotent.
-- Invalid provider output creates no candidate. A valid batch may report individual proposal rejection, but promotion remains impossible without a later human review.
-- Existing v1/v2 schemas, hooks, SessionStart, dynamic experience matching, OpenViking adapter, and reviewed-memory trust boundary remain unchanged.
+- Observability configuration is exact-key validated and stored at `.continuity/local/worktrees/<worktree-id>/observability.json`; missing means disabled.
+- Events are canonical one-line JSON objects at `observability/events.jsonl`, protected by a separate short-lived lock. Each line is at most 8 KiB; active storage is bounded to 10 MiB and 30 days by deterministic compaction.
+- Automatic event writes fail open for observability only: malformed trace state, lock timeout, disk failure, or disabled tracing must not fail checkpoint, candidate, retrieval, schedule, review, or Hook behavior.
+- Event types are `write_attempt`, `write_result`, `retrieval`, `injection`, and `outcome`; `used_by_agent`, `affected_decision`, and `task_success` remain nullable and are populated only by explicit confirmed outcome annotation.
+- Retrieval records IDs/rank/score/filter metadata only when the underlying operation objectively exposes them. Missing OpenViking scores remain null; retrieval is never relabeled as injection.
+- SessionStart is the only confirmed automatic injection boundary and retains its existing 6000-byte safety cap. Relation-aware growth belongs to explicit `experience match`, where selectors and activated relations objectively exist; M10 records its chosen budget but does not claim the result was injected.
+- Reports describe evidence and explicit gaps. They never claim memory caused an outcome, and candidate generation remains separate from human review/promotion.
 
 ### File and Phase Scope
 
-- Current state remains only in this `CONTEXT.md` Current Brief and Pending List; lasting user-facing behavior is documented in `docs/SCHEDULED_MEMORY_CANDIDATES_REQUIREMENTS.zh-CN.md`.
-- Approved implementation surfaces are a new pure-contract `agentmemory/scheduler.py`, a new execution boundary `agentmemory/schedule_runtime.py`, `agentmemory/storage.py`, `agentmemory/cli.py`, focused tests, `README.md`, `SECURITY.md`, `PRIVACY.md`, and the public AgentMemory Skill.
-- Hooks, record schemas, OpenViking code, resume rendering, plugin manifest version, and reviewed-record behavior are do-not-touch.
-- Work is isolated on `codex/m9-scheduled-memory-candidates`, based on P0 commit `e81deed`; pre-existing `.gitignore`, `.continuity/`, and context-audit changes are user state to preserve.
+- Current task state remains only in this `CONTEXT.md`; lasting behavior belongs in the existing requirements/security/privacy/readme/Skill documentation.
+- Approved code surfaces are a minimal new `agentmemory/observability.py`, existing `storage.py`, `cli.py`, `schedule_runtime.py`, `openviking.py`, `capsule.py`/`hook.py` only where the real boundary requires it, and focused tests.
+- Record schemas, receipt validation, candidate/review semantics, provider prompts/adapters, hook event registration, plugin manifest shape, and shared storage are do-not-touch.
+- Work is isolated on `codex/m10-memory-observability`, based on local `main` commit `97ac3ce`; pre-existing user changes in the original worktree remain untouched.
 
 ### Acceptance Commands
 
-- `py -3 -m unittest tests.test_scheduler -v`
+- `py -3 -m unittest tests.test_observability -v`
+- Focused scheduler, OpenViking, storage/CLI, and Hook tests affected by instrumentation.
 - `py -3 -m unittest discover -s tests -v`
 - `python -m unittest discover -s tests -v`
 - `py -3 -m compileall -q agentmemory hooks skills`
 - Python 3.9 AST parsing, JSON parsing, Skill validation, Plugin validation, and `git diff --check`.
-- Dry-run plans for Codex, Claude, and Gemini must contain no shell command string, secret, review command, receipt path, or shared-memory write.
+- Disabled observability creates no trace files; enabled tracing survives malformed/local write failures without altering primary command or Hook output.
+- Report/export output parses as strict JSON and contains no raw content or host paths; explicit deletion and outcome annotation require confirmation.
+- SessionStart remains bounded at 6000 bytes; `experience match` remains 8192 bytes at zero activated relations, grows by 2048 bytes per relation, and never exceeds 24576 bytes.
 
 ### Stop Conditions
 
-- Stop if a provider requires write-capable AI permissions, shell interpolation, credential persistence, or bypassing provider safety controls.
-- Stop if candidate generation cannot remain bounded, parseable, secret-scanned, worktree-scoped, and separate from human review/promotion.
-- Stop if implementation requires changing Hook events, reviewed schemas, `CONTINUITY.md`, OpenViking, or the existing receipt trust path.
-- Stop before installing a scheduler, invoking a paid/provider run for acceptance, or making any external write without separate authorization.
+- Stop if event correlation requires persisting raw session IDs, prompts, memory bodies, host paths, credentials, or hidden reasoning.
+- Stop if instrumentation can fail the primary memory/Hook operation or requires changing record schemas/receipt trust.
+- Stop if a useful daily report requires an automatic evaluator, causal inference, model call, database, service, or cross-project store.
+- Stop before merge, push, release, scheduler creation, destructive cleanup, or automatic memory promotion.
 
 ## Pending List
 
-- Current Work: M9 implementation, final regression, independent re-review, and isolated Codex-home installation are complete.
-- OpenViking was queried with the explicit project URI but its local service was unavailable; this is not a feature precondition and no repair/start was attempted.
-- External scheduler installation and live paid-provider execution remain deferred acceptance gates.
-- M10 observability and usefulness-test requirements are documented but intentionally not implemented in M9.
-- Exact Next Action: obtain explicit authorization before real-host installation, external scheduler creation, or a live paid-provider smoke run; otherwise start M10 observability as a separate branch.
+- Current Work: implement M10 on `codex/m10-memory-observability`, then run focused/full verification and a fresh independent Terra xhigh review.
+- M9 is merged locally into `main`, installed as personal plugin version `0.1.1+codex.20260905034459`, and passed a real Codex provider smoke in `C:\am9-smoke-0905`: exit 0, three local unreviewed candidates, one bounded rejection, zero tracked-file changes, scheduler disabled afterward.
+- M9 live diagnostics also exposed the Windows long-path ceiling in the first disposable temp repository; the successful acceptance repo used a shorter path. Long-path support is intentionally deferred because it is not an M10 dependency.
+- OpenViking was healthy earlier but returned no relevant project memory; live repository evidence remains authoritative.
+- Exact Next Action: implement the settled minimal event/config/report core, then integrate only the existing objective transition points serially.
 
 ## M9 Acceptance Evidence
 
