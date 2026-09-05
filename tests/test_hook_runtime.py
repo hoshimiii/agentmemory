@@ -1,4 +1,6 @@
 import hashlib
+import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -9,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 from unittest import mock
 
+from agentmemory import observability
 from agentmemory import schema
 from agentmemory.identity import get_git_identity
 from agentmemory.render import (
@@ -75,6 +78,19 @@ def _run_hook(
         env={**os.environ, **(env or {})},
         cwd=str(cwd),
     )
+
+
+def _run_hook_in_process(action: str, payload: Dict[str, Any]) -> tuple[str, str]:
+    spec = importlib.util.spec_from_file_location("agentmemory_hook_test", DISPATCHER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    stdout, stderr = io.StringIO(), io.StringIO()
+    with mock.patch.object(sys, "argv", [str(DISPATCHER), action]), \
+         mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+         mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+        module.run()
+    return stdout.getvalue(), stderr.getvalue()
 
 
 def _snapshot(path: Path) -> Dict[str, str]:
@@ -688,6 +704,7 @@ class TestAgentMemoryHookRuntime(unittest.TestCase):
                 )
                 review_candidate(repo, f"cand-{index:03d}")
 
+            observability.configure(repo, enabled=True)
             result = _run_hook(
                 "session-start",
                 {
@@ -709,6 +726,14 @@ class TestAgentMemoryHookRuntime(unittest.TestCase):
                 40 - len(capsule["project_records"]),
             )
             self.assertEqual(capsule["project_records"][0]["record_type"], "project_record")
+            injection = observability.export(repo)["events"]
+            self.assertEqual(len(injection), 1)
+            self.assertTrue(injection[0]["payload"]["truncated"])
+            self.assertEqual(injection[0]["payload"]["conflict_reason"], "truncated")
+            self.assertEqual(
+                injection[0]["payload"]["memory_ids"],
+                [capsule["checkpoint"]["id"], *[record["id"] for record in capsule["project_records"]]],
+            )
 
             json.loads(result.stdout)
 
@@ -754,6 +779,70 @@ class TestAgentMemoryHookRuntime(unittest.TestCase):
             context = json.loads(resumed.stdout)["hookSpecificOutput"]["additionalContext"]
             self.assertLessEqual(len(context.encode("utf-8")), MAX_RESUME_CAPSULE_CHARS)
             self.assertEqual(_parse_context(resumed)["checkpoint"]["id"], "cp-small")
+
+    def test_session_start_observability_is_fail_open_and_precompact_is_inert(self) -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            repo = Path(workdir) / "repo"
+            repo.mkdir()
+            _init_git_repo(repo)
+            initialize_repository(repo)
+            create_checkpoint(repo, "checkpoint", {"value": 1}, record_id="cp-observe")
+            create_candidate(repo, "decision", "project", {"value": "project"}, record_id="cand-observe")
+            reviewed = review_candidate(repo, "cand-observe")
+            payload = {"hook_event_name": "SessionStart", "cwd": str(repo), "session_id": SENSITIVE_FIELDS["session_id"]}
+            identity = get_git_identity(repo)
+            trace_dir = repo / ".continuity" / "local" / "worktrees" / identity["worktree_id"] / "observability"
+
+            missing = _run_hook("session-start", payload, repo)
+            self.assertEqual(missing.returncode, 0)
+            self.assertEqual(missing.stderr, "")
+            self.assertFalse(trace_dir.exists())
+
+            observability.configure(repo, enabled=True)
+            enabled = _run_hook("session-start", payload, repo)
+            self.assertEqual(enabled.returncode, 0)
+            self.assertEqual(enabled.stdout, missing.stdout)
+            self.assertEqual(enabled.stderr, missing.stderr)
+            events = observability.export(repo)["events"]
+            self.assertEqual(len(events), 1)
+            event, capsule = events[0], _parse_context(enabled)
+            self.assertEqual(event["event_type"], "injection")
+            self.assertEqual(event["record_id"], "cp-observe")
+            self.assertEqual(event["payload"]["memory_ids"], ["cp-observe", reviewed["id"]])
+            self.assertEqual(event["payload"]["order"], [0, 1])
+            self.assertEqual(event["payload"]["bytes"], len(json.loads(enabled.stdout)["hookSpecificOutput"]["additionalContext"].encode("utf-8")))
+            self.assertEqual(event["payload"]["budget"], MAX_RESUME_CAPSULE_CHARS)
+            self.assertFalse(event["payload"]["truncated"])
+            self.assertIsNone(event["payload"]["conflict_reason"])
+            rendered = json.dumps(event, separators=(",", ":"))
+            for value in SENSITIVE_FIELDS.values():
+                self.assertNotIn(value, rendered)
+            self.assertEqual(event["payload"]["memory_ids"], [capsule["checkpoint"]["id"], *[record["id"] for record in capsule["project_records"]]])
+
+            observability.delete(repo, confirm=True, all_events=True)
+            observability.configure(repo, enabled=False)
+            disabled = _run_hook("session-start", payload, repo)
+            self.assertEqual(disabled.stdout, missing.stdout)
+            self.assertEqual(disabled.stderr, missing.stderr)
+            self.assertEqual(observability.export(repo)["events"], [])
+
+            observability.configure(repo, enabled=True)
+            precompact = _run_hook("pre-compact", {"hook_event_name": "PreCompact", "session_id": SENSITIVE_FIELDS["session_id"]}, repo)
+            self.assertEqual(precompact.stdout, FALLBACK_OUTPUT)
+            self.assertEqual(precompact.stderr, "")
+            self.assertEqual(observability.export(repo)["events"], [])
+
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            (trace_dir / "events.jsonl").write_text("{", encoding="utf-8")
+            malformed = _run_hook("session-start", payload, repo)
+            self.assertEqual(malformed.stdout, missing.stdout)
+            self.assertEqual(malformed.stderr, missing.stderr)
+
+            for result in (False, RuntimeError("trace failed")):
+                with self.subTest(result=result), mock.patch("agentmemory.observability.emit", side_effect=result if isinstance(result, Exception) else None, return_value=result if result is False else mock.DEFAULT):
+                    stdout, stderr = _run_hook_in_process("session-start", payload)
+                self.assertEqual(stdout, missing.stdout)
+                self.assertEqual(stderr, missing.stderr)
 
     def test_precompact_payload_is_idempotent_and_side_effect_free(self) -> None:
         with tempfile.TemporaryDirectory() as workdir:

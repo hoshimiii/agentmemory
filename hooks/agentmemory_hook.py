@@ -56,6 +56,46 @@ def format_pre_compact_response() -> str:
     return CONTINUE_RESPONSE
 
 
+def _emit_injection(cwd: str, capsule: str) -> None:
+    """Best-effort trace derived only from the model-visible capsule."""
+    try:
+        from agentmemory import observability
+        from agentmemory.render import MAX_RESUME_CAPSULE_CHARS
+
+        rendered = json.loads(capsule)
+        if not isinstance(rendered, dict):
+            return
+        memory_ids = []
+        checkpoint_id = None
+        checkpoint = rendered.get("checkpoint")
+        if isinstance(checkpoint, dict) and isinstance(checkpoint.get("id"), str):
+            checkpoint_id = checkpoint["id"]
+            memory_ids.append(checkpoint_id)
+        project_records = rendered.get("project_records")
+        if isinstance(project_records, list):
+            for record in project_records:
+                if isinstance(record, dict) and isinstance(record.get("id"), str):
+                    memory_ids.append(record["id"])
+        omitted = rendered.get("omitted_project_record_count")
+        truncated = type(omitted) is int and omitted > 0
+        observability.emit(
+            cwd,
+            event_type="injection",
+            correlation_id=observability.new_correlation_id(),
+            record_id=checkpoint_id,
+            payload={
+                "memory_ids": memory_ids,
+                "order": list(range(len(memory_ids))),
+                "bytes": len(capsule.encode("utf-8")),
+                "budget": MAX_RESUME_CAPSULE_CHARS,
+                "truncated": truncated,
+                "conflict_reason": "truncated" if truncated else None,
+            },
+        )
+    except Exception:
+        pass
+
+
 def run() -> None:
     if len(sys.argv) != 2:
         fail()
@@ -94,6 +134,7 @@ def run() -> None:
             sys.stdout.write(CONTINUE_RESPONSE)
             return
 
+        _emit_injection(cwd, capsule)
         sys.stdout.write(format_session_start_response(capsule))
         return
 
