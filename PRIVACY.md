@@ -9,8 +9,9 @@ AgentMemory stores explicitly supplied content and, only when explicitly enabled
 - explicitly reviewed v2 strategy/warning experiences under `.continuity/shared/experiences/` and their local receipts;
 - a deterministic tracked `.continuity/CONTINUITY.md` rendering.
 - ignored worktree-local `scheduler.json` configuration; reports are returned on scheduler stdout and not stored separately.
+- optional ignored worktree-local `observability.json` and a bounded `observability/events.jsonl` containing strict event metadata only. It stores opaque IDs, UTC times, typed write/retrieval/injection/outcome metadata, and explicit outcome annotations; it excludes raw prompts, queries, content, paths, session IDs, provider output/logs, environment values, credentials, and hidden reasoning.
 
-It does not collect full chats, transcripts, logs, reasoning traces, tool output, process telemetry, `PLUGIN_DATA`, or unrelated repository files. A scheduled provider run captures bounded stdout/stderr and structured output in temporary files for validation, removes them on completion or failure, and does not retain them as AgentMemory records. Evidence stores only supplied command text, exit code, timestamp, Git head, and an optional digest; it does not execute commands or retain their output. `SessionStart` reads validated checkpoint and confirmed v1 project-record files only; explicit experience matching reads receipt-gated v2 sidecars only.
+It does not collect full chats, transcripts, logs, reasoning traces, tool output, process telemetry, `PLUGIN_DATA`, or unrelated repository files. A scheduled provider run captures bounded stdout and structured output in temporary files for validation, discards provider stderr, removes temporary files on completion or failure, and does not retain them as AgentMemory records. Evidence stores only supplied command text, exit code, timestamp, Git head, and an optional digest; it does not execute commands or retain their output. `SessionStart` reads validated checkpoint and confirmed v1 project-record files only; explicit experience matching reads receipt-gated v2 sidecars only.
 
 ## Data movement
 
@@ -22,6 +23,7 @@ The plugin contains no socket or telemetry client and performs no synchronizatio
 - Reviewed project records, reviewed experience sidecars, and `CONTINUITY.md` may remain in the working tree and Git history. Deleting a working-tree file does not erase existing commits or remote copies.
 - Disabling, uninstalling, or rolling back AgentMemory leaves all project data, including v2 sidecars and receipts, intact by default.
 - Purging data is a separate destructive operation: back it up, inspect the exact repository path, and obtain explicit user approval before removal.
+- The active observability log is capped at 10 MiB and the newest 30 days. `observability delete --all|--before YYYY-MM-DD --confirm` is the explicit local trace-deletion path; disabling observability does not delete existing trace data.
 
 ## Sensitive data
 

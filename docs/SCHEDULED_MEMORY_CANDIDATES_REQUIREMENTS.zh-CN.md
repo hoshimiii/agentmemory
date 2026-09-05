@@ -98,7 +98,7 @@ agentmemory --repo <repo> schedule run [--dry-run]
 - cwd 固定为当前仓库根。
 - executable 从 PATH 解析；找不到时返回不泄露环境的失败报告。
 - 因此 Windows 上未提供原生 `.exe` 的 Claude 或 Gemini 会被视为不可用；这是 fail-closed 行为。
-- stdout、stderr 和 Codex final-output 使用临时文件与运行期大小监测；设置有限超时和输出字节上限。超时、非零退出、非法 UTF-8、超限或非法 JSON 都不得写 candidate，临时文件必须在 `finally` 清理。
+- stdout 和 Codex final-output 使用临时文件与运行期大小监测，provider stderr 直接丢弃；设置有限超时和输出字节上限。超时、非零退出、非法 UTF-8、超限或非法 JSON 都不得写 candidate，临时文件必须在 `finally` 清理。
 - read-only/plan 是被选 provider CLI 提供的安全边界，不是 AgentMemory 提供的 OS/内核沙箱；provider 仍可能读取其自身配置或进行模型 API 通信。
 
 ## 6. AI 输入与输出
@@ -203,7 +203,7 @@ AI 输入只允许说明其读取当前仓库中的 Git、代码、测试、规�
 - [x] 两个 Python 入口、compile、Python 3.9 AST、JSON、Skill、Plugin、diff 检查通过。
 - [x] fresh Terra xhigh 独立审查无未解决 P0/P1 finding。
 
-## 11. 后续数据提取与效用验证需求（M10，未实现）
+## 11. 可观测性与效用验证（M10，部分实现）
 
 M9 只负责生成待审核 candidate，不声称记忆已经改善任务结果。后续可观测性必须沿同一条关联链记录：
 
@@ -259,4 +259,4 @@ M9 只负责生成待审核 candidate，不声称记忆已经改善任务结果�
 
 只有同时满足以下条件，单次日常运行才可报告为正常：外部 scheduler 确实触发；provider 退出码为 0；输出严格解析；候选被创建、幂等识别或有界拒绝；shared memory 与 Git tracked 状态未变化；日报产生；本轮可观察阶段都有相同 `correlation_id` 或明确的缺口原因。
 
-M9 当前没有 trace 写入、检索/注入关联、日报持久化或反事实评测，因此只能离线证明“候选整理管线和人工审核边界按合同工作”，不能证明“每日任务已实际触发”或“记忆改善了最终任务”。
+已实现：独立默认关闭的 worktree-local observability 开关、严格 JSONL 事件、导出、UTC 日报、显式 outcome 标注与确认删除。事件只保存有界类型化元数据和不透明关联 ID；单条最多 8 KiB，active log 保留最近 30 天且不超过 10 MiB。自动写入 best-effort，不改变主操作；retrieval 不等于 injection，日报只报告计数、覆盖与缺口，不证明因果或效用。SessionStart 仍固定 6000 bytes；experience match 采用 8 KiB 基础、每个激活 relation 加 2 KiB、最高 24 KiB。四臂反事实实验仍由外部人工执行；本项目不安装 scheduler、不保证每日触发，也不自动 review、promotion 或评测。

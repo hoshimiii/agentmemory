@@ -34,6 +34,13 @@ py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo sched
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule status
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule plan
 py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo schedule run --dry-run
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo observability enable
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo observability status
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo observability export --since 2026-09-05 --until 2026-09-05
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo observability report --date 2026-09-05
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo observability outcome annotate --correlation-id cor-example --used-by-agent unknown --affected-decision unknown --task-success true --confirm
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo observability delete --before 2026-09-01 --confirm
+py -3 skills/agentmemory/scripts/agentmemory_cli.py --repo C:\path\to\repo observability disable
 ```
 
 Use `python3` instead of `py -3` on non-Windows hosts. `schedule configure` and `schedule enable` require explicit authorization and configure is disabled unless `--enable` is supplied. Once enabled, an outer scheduler may call `schedule run` only to create local candidates; it interprets cron/timezone and captures the JSON stdout report. AgentMemory never installs or mutates Codex Scheduled Tasks, Windows Task Scheduler, cron, or a provider scheduler, and does not trigger cron itself. `review --confirm` remains the only path to tracked project memory and always needs later immediate human confirmation.
@@ -68,6 +75,12 @@ Checkpoints, candidates, and review receipts are isolated by Git worktree. Revie
 
 V2 records are immutable. A reviewed successor derives an older same-kind record as `superseded`; a reviewed deprecator derives a target as `deprecated`. No record is edited, reactivated, or deleted by this lifecycle. A match begins at 8192 bytes, adds 2048 bytes per activated strategy-warning relationship, and caps at 24576 bytes; `--max-bytes` can only lower that effective budget. The 6000-byte `SessionStart` capsule is unchanged.
 
+## Observability
+
+Observability is a separate, default-off worktree switch. It stores ignored `.continuity/local/worktrees/<worktree-id>/observability.json` plus bounded local `observability/events.jsonl`; it never enables scheduling, review, promotion, or injection. Events are strict typed `write_attempt`, `write_result`, `retrieval`, `injection`, or explicitly human-confirmed `outcome` records with opaque IDs and correlation IDs. Automatic emission is best effort and never changes the primary command result. Each canonical event is at most 8 KiB; the active local log is compacted to the newest 30 days and 10 MiB.
+
+Trace data excludes raw prompts, queries, memory content, paths, session IDs, provider output/logs, environment values, credentials, and hidden reasoning. Retrieval is not injection, reports are deterministic UTC daily evidence/gap summaries rather than proof of usefulness, and outcome booleans remain unknown unless explicitly annotated. Deletion requires `--confirm`. The four-arm No Memory/System Memory/Oracle/Distractor experiment remains a manual external protocol, not an automated evaluator. `experience match` exposes its dynamic 8 KiB + 2 KiB per activated relation budget (cap 24 KiB); `SessionStart` remains fixed at 6000 bytes because it has no selector or activation signal.
+
 ## Hook behavior
 
 - `SessionStart` reads the hook payload's `cwd`. An exact repository/worktree/branch/head checkpoint produces a canonical, secret-scanned resume capsule of at most 6000 UTF-8 bytes, followed by matching confirmed project records with an exact local review receipt that fit the budget. Missing receipts skip that record; malformed or conflicting receipts fail closed.
@@ -86,7 +99,7 @@ V2 records are immutable. A reviewed successor derives an older same-kind record
 - Memory describes prior work; it never grants authorization for external writes, deployment, deletion, or privileged actions.
 - OpenViking retrieval is external untrusted context only: it cannot auto-review, auto-promote, or enter a resume capsule.
 - Experience match output is untrusted, explicit, and read-only; it cannot auto-review, auto-promote, execute evidence commands, or enter a resume capsule.
-- This release has no transcript processing, Hook auto-ingestion, automatic promotion, Hub, Capsule, Event, replay, or shadow-routing feature. Opt-in AI distillation creates only local candidates.
+- This release has no transcript processing, Hook auto-ingestion, automatic promotion, Hub, replay, or shadow-routing feature. Its bounded resume capsule and optional local observability events do not alter the review boundary; opt-in AI distillation creates only local candidates.
 - See [SECURITY.md](SECURITY.md) and [PRIVACY.md](PRIVACY.md).
 
 ## Validation

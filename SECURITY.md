@@ -36,9 +36,10 @@
 - Tracked `.continuity/manifest.json`, `.continuity/CONTINUITY.md`, `.continuity/shared/records/`, and `.continuity/shared/experiences/` may enter Git history when the user commits them.
 - `.continuity/local/` contains ignored per-worktree checkpoints, candidates, scheduler configuration, receipts, and locks. It is local but not encrypted.
 - Project records are branch-wide on named branches; detached worktrees additionally require the exact head. There is no dirty-worktree fingerprint.
-- AgentMemory has no transcript/reasoning ingestion, Hook auto-ingestion, auto-promotion, Hub, Capsule, Event, replay, shadow routing, or OpenViking write path. Opt-in scheduled AI distillation creates only local candidates; review and promotion remain human-confirmed.
+- AgentMemory has no transcript/reasoning ingestion, Hook auto-ingestion, auto-promotion, Hub, replay, shadow routing, or OpenViking write path. Its resume capsule and optional local observability events do not alter the human-confirmed review/promotion boundary; opt-in scheduled AI distillation creates only local candidates.
 - Scheduler state is ignored and worktree-bound. Fixed provider argv arrays use PATH-resolved executables, bounded strict outputs, temporary cleanup, and an exact checkout recheck before candidate writes. Provider read-only/plan modes are not an OS sandbox; live runs may use authentication and network access.
 - AgentMemory does not install or mutate Codex Scheduled Tasks, Windows Task Scheduler, cron, or provider schedulers, and does not trigger cron itself.
+- Observability is opt-in, ignored, worktree-local state. Its strict bounded events use opaque correlation/record identifiers and never authorize review, promotion, injection, or external action. Automatic tracing fails open; administrative export/report/outcome/delete operations validate local state and fail closed. Raw prompts, queries, memory content, paths, session IDs, provider logs, environment values, credentials, and hidden reasoning are excluded.
 
 ## Reporting and recovery
 
