@@ -114,9 +114,9 @@ AI 输入只允许说明其读取当前仓库中的 Git、代码、测试、规�
       "kind": "decision",
       "summary": "候选摘要",
       "semantic_role": "fact",
-      "content": {"decision": "...", "evidence": "..."},
+      "content_json": "{\"decision\":\"...\",\"evidence\":\"...\"}",
       "paths": ["relative/path"],
-      "experience": null
+      "experience_json": "null"
     }
   ]
 }
@@ -124,8 +124,9 @@ AI 输入只允许说明其读取当前仓库中的 Git、代码、测试、规�
 
 - 最多 5 条 proposal；数组可为空。
 - kind 复用既有 `decision|incident|constraint|strategy|warning`。
-- Strategy/Warning 必须提供完整 v2 `experience`；其他 kind 必须为 `null`。
-- 所有内容继续通过既有 JSON shape、路径、大小、secret scan 和 schema 校验。
+- 为兼容 Codex Structured Outputs，provider wire proposal 只使用严格对象字段 `kind`、`summary`、`semantic_role`、`content_json`、`paths`、`experience_json`；所有对象均设置 `additionalProperties:false`，不使用 `allOf`、`if`、`then` 或 `else`，也不含未约束的 object 值。
+- `content_json` 是有上限的 JSON 编码字符串，运行时必须严格解析为 object。`experience_json` 也是有上限的 JSON 编码字符串；Strategy/Warning 必须解析为完整 v2 `experience` object，其他 kind 必须解析为 `null`。
+- 解码后恢复既有内部 proposal 的 `content` 与 `experience`；继续通过既有 JSON shape、路径、大小、secret scan 和 schema 校验。
 - 模型不得提供 review 状态、receipt、project record、可信度分数、命令权限或持久记忆 ID。
 
 ## 7. 写入与幂等
@@ -135,7 +136,7 @@ AI 输入只允许说明其读取当前仓库中的 Git、代码、测试、规�
 - 每条 proposal 的 candidate ID 由 repository ID、worktree ID、当前 branch、当前 HEAD 和规范化 proposal 的 SHA-256 派生；同一 checkout 的同一 proposal 重试幂等，避免同一 HEAD 的分支切换冲突。
 - 定时生成的 candidate 固定记录 `provenance.source: scheduled-ai`，手工 CLI candidate 继续记录 `cli`；provider 输出不能选择或覆盖来源。
 - 同一批次的重复规范化 proposal 只处理一次，其余报告为 `duplicate`。
-- 单条 proposal 验证失败时记录为 rejected，不转换为更宽松类型；其他独立合法 proposal 可继续写入。
+- 外层 batch envelope 非法时整轮失败；单条 proposal（包括 JSON 编码字段无法解析或配对错误）验证失败时记录为 rejected，不转换为更宽松类型；其他独立合法 proposal 可继续写入。
 - executable、进程、I/O、锁、磁盘或身份变化属于 operational failure，立即停止；只有单条 schema、secret、path 校验失败允许继续下一条。
 - 写入位置仍是 `.continuity/local/worktrees/<worktree-id>/candidates/`。
 - 不创建 review receipt，不写 `.continuity/shared/records/`、`.continuity/shared/experiences/` 或 `CONTINUITY.md`。

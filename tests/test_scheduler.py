@@ -11,6 +11,7 @@ from agentmemory.scheduler import (
     SchedulerValidationError,
     build_distillation_prompt,
     build_provider_argv,
+    candidate_batch_schema,
     candidate_id_for,
     deduplicate_proposals,
     parse_cron,
@@ -63,6 +64,20 @@ def _proposal(kind="decision", **changes):
     }
     if kind in ("strategy", "warning"):
         value["experience"] = {"applicability": {"task_types": ["bugfix"]}}
+    value.update(changes)
+    return value
+
+
+def _wire_proposal(proposal=None, **changes):
+    proposal = _proposal() if proposal is None else proposal
+    value = {
+        "kind": proposal["kind"],
+        "summary": proposal["summary"],
+        "semantic_role": proposal["semantic_role"],
+        "content_json": json.dumps(proposal["content"]),
+        "paths": proposal["paths"],
+        "experience_json": json.dumps(proposal["experience"]),
+    }
     value.update(changes)
     return value
 
@@ -124,7 +139,7 @@ class SchedulerProviderContractTests(unittest.TestCase):
                 self.assertFalse(any(";" in part or "&&" in part for part in argv))
 
     def test_only_the_provider_contract_source_is_parsed(self):
-        batch = {"summary": "ok", "proposals": [_proposal()]}
+        batch = {"summary": "ok", "proposals": [_wire_proposal()]}
         self.assertEqual(parse_provider_output("codex", json.dumps(batch))["summary"], "ok")
         self.assertEqual(
             parse_provider_output("claude", json.dumps({"result": "ignore", "structured_output": batch}))["summary"], "ok"
@@ -136,6 +151,28 @@ class SchedulerProviderContractTests(unittest.TestCase):
             parse_provider_output("claude", json.dumps({"result": json.dumps(batch)}))
         with self.assertRaises(SchedulerValidationError):
             parse_provider_output("gemini", json.dumps({"response": json.dumps(batch), "error": "no"}))
+
+    def test_structured_output_wire_schema_and_decoding(self):
+        schema = candidate_batch_schema()
+
+        def objects(value):
+            if isinstance(value, dict):
+                yield value
+                yield from (item for child in value.values() for item in objects(child))
+            elif isinstance(value, list):
+                yield from (item for child in value for item in objects(child))
+
+        for value in objects(schema):
+            self.assertFalse({"allOf", "if", "then", "else"} & set(value))
+            if value.get("type") == "object":
+                self.assertFalse(value.get("additionalProperties", True))
+        proposal = _proposal("strategy")
+        decoded = parse_provider_output("codex", json.dumps({"summary": "ok", "proposals": [_wire_proposal(proposal)]}))
+        self.assertEqual(decoded["proposals"], [proposal])
+        with self.assertRaises(SchedulerValidationError):
+            parse_provider_output("codex", json.dumps({"summary": "ok", "proposals": [_wire_proposal(content_json="[]")]}))
+        with self.assertRaises(SchedulerValidationError):
+            parse_provider_output("codex", json.dumps({"summary": "ok", "proposals": [_wire_proposal(experience_json="{}")]}))
 
 
 class SchedulerCandidateContractTests(unittest.TestCase):
@@ -290,7 +327,7 @@ class SchedulerRuntimeTests(unittest.TestCase):
                 self.assertFalse(schedule_status(str(repo))["enabled"])
                 self.assertEqual(run_schedule(str(repo), dry_run=True), plan)
                 from agentmemory import schedule_runtime
-                with mock.patch.object(schedule_runtime, "_run_provider", return_value={"summary": "ok", "proposals": [_proposal()]}):
+                with mock.patch.object(schedule_runtime, "_run_provider", return_value={"summary": "ok", "proposals": [_wire_proposal()]}):
                     with self.assertRaises(ScheduleRuntimeError):
                         run_schedule(str(repo))
                 from agentmemory.storage import enable_scheduler_config
@@ -313,7 +350,7 @@ class SchedulerRuntimeTests(unittest.TestCase):
                     "continuity": (repo / ".continuity" / "CONTINUITY.md").read_bytes(),
                     "git": _git(repo, "status", "--porcelain").stdout,
                 }
-                with mock.patch.object(schedule_runtime, "_run_provider", return_value={"summary": "ok", "proposals": [_proposal()]}):
+                with mock.patch.object(schedule_runtime, "_run_provider", return_value={"summary": "ok", "proposals": [_wire_proposal()]}):
                     report = run_schedule(str(repo))
                 protected_after = {
                     "records": tree_snapshot(repo / ".continuity" / "shared" / "records"),
@@ -338,17 +375,18 @@ class SchedulerRuntimeTests(unittest.TestCase):
             _repo(repo)
             initialize_repository(repo)
             configure_schedule(str(repo), provider="codex", model="gpt-5.6-terra", cron="0 3 * * *", enabled=True)
-            valid = _proposal()
-            invalid = _proposal(paths=["../escape"])
-            payload = {"summary": "ok", "proposals": [valid, invalid, valid, invalid]}
+            valid = _wire_proposal()
+            malformed = _wire_proposal(content_json="{")
+            invalid = _wire_proposal(_proposal(paths=["../escape"]))
+            payload = {"summary": "ok", "proposals": [valid, malformed, invalid, valid, malformed]}
             from agentmemory import schedule_runtime
             with mock.patch("agentmemory.schedule_runtime.shutil.which", return_value="C:/tools/codex.exe"), \
                  mock.patch.object(schedule_runtime, "_run_provider", return_value=payload):
                 first = run_schedule(str(repo))
                 second = run_schedule(str(repo))
-            self.assertEqual(first["rejected_count"], 1)
-            self.assertEqual(first["rejections"], [{"proposal_index": 1, "category": "invalid_proposal"}])
-            self.assertEqual(first["duplicate_count"], 2)
+            self.assertEqual(first["rejected_count"], 3)
+            self.assertEqual(first["rejections"], [{"proposal_index": 1, "category": "invalid_proposal"}, {"proposal_index": 2, "category": "invalid_proposal"}, {"proposal_index": 4, "category": "invalid_proposal"}])
+            self.assertEqual(first["duplicate_count"], 1)
             self.assertTrue(second["candidates"][0]["idempotent"])
 
     def test_disable_between_plan_and_reload_prevents_provider_launch(self):

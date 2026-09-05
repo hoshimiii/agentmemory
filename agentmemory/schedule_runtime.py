@@ -13,7 +13,7 @@ from .identity import get_git_identity
 from .scheduler import (
     MAX_PROVIDER_OUTPUT_BYTES, PROVIDERS, SchedulerValidationError, build_distillation_prompt,
     build_provider_argv, candidate_batch_schema, candidate_id_for,
-    extract_provider_payload, normalize_proposal, validate_candidate_envelope,
+    decode_provider_proposal, extract_provider_payload, normalize_proposal, validate_candidate_envelope,
 )
 from .storage import StorageError, checkout_identity_matches, create_candidate, load_scheduler_config, preflight_candidate, write_scheduler_config
 
@@ -172,7 +172,7 @@ def run_schedule(repo_path: Optional[str], *, dry_run: bool = False) -> Dict[str
         rejections = []
         for proposal_index, item in enumerate(payload["proposals"]):
             try:
-                proposal = normalize_proposal(item)
+                proposal = normalize_proposal(decode_provider_proposal(item))
                 candidate_id = candidate_id_for(before, proposal)
                 if candidate_id in seen_candidate_ids:
                     duplicates.append(candidate_id)

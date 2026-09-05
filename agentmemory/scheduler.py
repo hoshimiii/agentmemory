@@ -31,6 +31,7 @@ MAX_MODEL_LENGTH = 128
 MAX_PROVIDER_OUTPUT_BYTES = 64 * 1024
 MAX_PROPOSALS = 5
 MAX_BATCH_SUMMARY_CHARS = 2048
+MAX_ENCODED_PROPOSAL_JSON_CHARS = MAX_PROVIDER_OUTPUT_BYTES
 
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$")
 _IDENTITY_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -269,25 +270,48 @@ def validate_candidate_envelope(payload: Any) -> Dict[str, Any]:
     return value
 
 
+def decode_provider_proposal(proposal: Any) -> Dict[str, Any]:
+    """Decode one structured-output wire proposal into the internal contract."""
+
+    fields = {"kind", "summary", "semantic_role", "content_json", "paths", "experience_json"}
+    value = _require_exact_keys(copy.deepcopy(proposal), fields, "provider proposal")
+    for field in ("content_json", "experience_json"):
+        if not isinstance(value[field], str) or len(value[field]) > MAX_ENCODED_PROPOSAL_JSON_CHARS:
+            _fail("invalid provider proposal")
+    return _validate_proposal({
+        "kind": value["kind"],
+        "summary": value["summary"],
+        "semantic_role": value["semantic_role"],
+        "content": parse_strict_json(value["content_json"]),
+        "paths": value["paths"],
+        "experience": parse_strict_json(value["experience_json"]),
+    })
+
+
+def decode_provider_batch(payload: Any) -> Dict[str, Any]:
+    """Decode a complete provider batch into the existing internal contract."""
+
+    value = validate_candidate_envelope(payload)
+    return validate_candidate_batch({
+        "summary": value["summary"],
+        "proposals": [decode_provider_proposal(proposal) for proposal in value["proposals"]],
+    })
+
+
 def candidate_batch_schema() -> Dict[str, Any]:
     """Return the exact JSON Schema supplied to structured-output providers."""
 
     proposal = {
         "type": "object", "additionalProperties": False,
-        "required": ["kind", "summary", "semantic_role", "content", "paths", "experience"],
+        "required": ["kind", "summary", "semantic_role", "content_json", "paths", "experience_json"],
         "properties": {
             "kind": {"enum": list(PROPOSAL_KINDS)},
             "summary": {"type": "string"},
             "semantic_role": {"enum": list(PROPOSAL_SEMANTIC_ROLES)},
-            "content": {"type": "object"},
+            "content_json": {"type": "string", "maxLength": MAX_ENCODED_PROPOSAL_JSON_CHARS},
             "paths": {"type": "array", "items": {"type": "string"}},
-            "experience": {"type": ["object", "null"]},
+            "experience_json": {"type": "string", "maxLength": MAX_ENCODED_PROPOSAL_JSON_CHARS},
         },
-        "allOf": [{
-            "if": {"properties": {"kind": {"enum": ["strategy", "warning"]}}},
-            "then": {"properties": {"experience": {"type": "object"}}},
-            "else": {"properties": {"experience": {"type": "null"}}},
-        }],
     }
     return {
         "type": "object", "additionalProperties": False,
@@ -325,16 +349,16 @@ def parse_provider_output(provider: str, raw: str) -> Dict[str, Any]:
         _fail("invalid provider")
     outer = parse_strict_json(raw)
     if provider == "codex":
-        return validate_candidate_batch(outer)
+        return decode_provider_batch(outer)
     if not isinstance(outer, dict):
         _fail("invalid provider envelope")
     if provider == "claude":
         if "structured_output" not in outer or not isinstance(outer["structured_output"], dict):
             _fail("missing structured provider output")
-        return validate_candidate_batch(outer["structured_output"])
+        return decode_provider_batch(outer["structured_output"])
     if "error" in outer or not isinstance(outer.get("response"), str):
         _fail("invalid provider envelope")
-    return validate_candidate_batch(parse_strict_json(outer["response"]))
+    return decode_provider_batch(parse_strict_json(outer["response"]))
 
 
 def normalize_proposal(proposal: Any) -> Dict[str, Any]:
@@ -419,8 +443,9 @@ def build_distillation_prompt() -> str:
         "credentials, or other projects. Do not review, promote, create receipts, or claim "
         "a durable-memory ID. Return only JSON matching this schema: "
         "{\"summary\":string,\"proposals\":[{\"kind\":\"decision|incident|constraint|strategy|warning\","
-        "\"summary\":string,\"semantic_role\":\"fact|inference\",\"content\":object,"
-        "\"paths\":[string],\"experience\":object|null}]}. At most five proposals. "
-        "For strategy and warning, experience must satisfy the existing v2 experience contract; "
-        "for all other kinds it must be null. Empty proposals is valid."
+        "\"summary\":string,\"semantic_role\":\"fact|inference\",\"content_json\":string,"
+        "\"paths\":[string],\"experience_json\":string}]}. At most five proposals. "
+        "content_json must encode a JSON object. experience_json must encode a v2 experience object for "
+        "strategy and warning, and JSON null for all other kinds. The runtime strictly decodes and validates "
+        "these strings before creating candidates. Empty proposals is valid."
     )
