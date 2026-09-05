@@ -1,12 +1,17 @@
+import io
+import hashlib
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from agentmemory import observability
 from agentmemory.observability import ObservabilityError
 from agentmemory.storage import StorageError, initialize_repository
+from agentmemory.cli import run as cli_run
 from tests.test_scheduler import _repo
 
 
@@ -15,6 +20,16 @@ def _retrieval_payload():
 
 
 class ObservabilityTests(unittest.TestCase):
+    def _cli_raw(self, *argv):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_run(argv)
+        return code, output.getvalue()
+
+    def _cli(self, *argv):
+        code, output = self._cli_raw(*argv)
+        return code, json.loads(output) if output else None
+
     def _initialized(self):
         directory = tempfile.TemporaryDirectory()
         repo = Path(directory.name) / "repo"
@@ -141,6 +156,150 @@ class ObservabilityTests(unittest.TestCase):
         with directory:
             with self.assertRaises(ObservabilityError):
                 observability.annotate_outcome(repo, correlation_id="cor-3", confirm=True, used_by_agent=None, affected_decision=None, task_success=None, user_corrections=None, retries=None, turns=None, tool_calls=None, token_cost=None)
+
+    def test_cli_controls_and_disabled_write(self):
+        directory, repo = self._initialized()
+        with directory:
+            base = ("--repo", str(repo), "observability")
+            self.assertEqual(self._cli(*base, "status"), (0, {"configured": False, "enabled": False}))
+            self.assertEqual(self._cli(*base, "enable")[0], 0)
+            self.assertTrue(self._cli(*base, "status")[1]["enabled"])
+            self.assertEqual(self._cli(*base, "disable")[0], 0)
+            before = self._cli("--repo", str(repo), "checkpoint", "create", "--summary", "x", "--content-json", "{}", "--id", "cp-observe")
+            self.assertEqual(before[0], 0)
+            self.assertEqual(observability.export(repo)["events"], [])
+
+    def test_cli_checkpoint_correlation_and_outcome(self):
+        directory, repo = self._initialized()
+        with directory:
+            self.assertEqual(self._cli("--repo", str(repo), "observability", "enable")[0], 0)
+            self.assertEqual(self._cli("--repo", str(repo), "checkpoint", "create", "--summary", "x", "--content-json", "{}", "--id", "cp-observe")[0], 0)
+            events = observability.export(repo)["events"]
+            self.assertEqual([item["event_type"] for item in events], ["write_attempt", "write_result"])
+            self.assertEqual(events[0]["correlation_id"], events[1]["correlation_id"])
+            self.assertEqual(events[1]["record_id"], "cp-observe")
+            correlation = events[0]["correlation_id"]
+            args = ("--repo", str(repo), "observability", "outcome", "annotate", "--correlation-id", correlation, "--used-by-agent", "unknown", "--affected-decision", "false", "--task-success", "true", "--confirm")
+            self.assertEqual(self._cli(*args)[0], 0)
+
+    def test_cli_observability_export_report_and_confirmed_delete(self):
+        directory, repo = self._initialized()
+        with directory:
+            base = ("--repo", str(repo), "observability")
+            day = datetime.now(timezone.utc).date().isoformat()
+            self.assertEqual(self._cli(*base, "enable")[0], 0)
+            self.assertEqual(self._cli("--repo", str(repo), "checkpoint", "create", "--summary", "x", "--content-json", "{}", "--id", "cp-export")[0], 0)
+
+            code, exported = self._cli(*base, "export", "--since", day, "--until", day)
+            self.assertEqual(code, 0)
+            self.assertTrue(exported["enabled"])
+            self.assertEqual([event["event_type"] for event in exported["events"]], ["write_attempt", "write_result"])
+            report = self._cli(*base, "report", "--date", day)[1]
+            self.assertEqual(report["counts"]["write_attempt"], 1)
+            self.assertEqual(report["write_result_statuses"]["created"], 1)
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(self._cli(*base, "delete", "--all")[0], 2)
+            self.assertEqual(self._cli(*base, "delete", "--all", "--confirm"), (0, {"deleted": 2}))
+            self.assertEqual(self._cli(*base, "export"), (0, {"enabled": True, "events": []}))
+
+    def test_cli_schedule_trace_pairs_and_rejection_outcomes(self):
+        directory, repo = self._initialized()
+        with directory:
+            self.assertEqual(self._cli("--repo", str(repo), "observability", "enable")[0], 0)
+            command = ("--repo", str(repo), "schedule", "run")
+            with mock.patch("agentmemory.cli.run_schedule", return_value={"plan": True}) as run:
+                self.assertEqual(self._cli(*command, "--dry-run"), (0, {"plan": True}))
+            run.assert_called_once_with(str(repo), dry_run=True)
+            self.assertEqual(observability.export(repo)["events"], [])
+
+            mixed = {"candidates": [{"id": "cand-scheduled"}], "rejected_count": 1}
+            with mock.patch("agentmemory.cli.run_schedule", return_value=mixed) as run:
+                self.assertEqual(self._cli(*command), (0, mixed))
+            run.assert_called_once_with(str(repo), dry_run=False)
+            events = observability.export(repo)["events"]
+            self.assertEqual([event["event_type"] for event in events], ["write_attempt", "write_result"])
+            self.assertEqual(events[0]["correlation_id"], events[1]["correlation_id"])
+            self.assertEqual(events[1]["payload"]["status"], "success")
+            self.assertIsNone(events[1]["payload"]["reason"])
+
+            observability.delete(repo, confirm=True, all_events=True)
+            rejected = {"candidates": [], "rejected_count": 2}
+            with mock.patch("agentmemory.cli.run_schedule", return_value=rejected):
+                self.assertEqual(self._cli(*command), (0, rejected))
+            rejected_events = observability.export(repo)["events"]
+            self.assertEqual([event["event_type"] for event in rejected_events], ["write_attempt", "write_result"])
+            self.assertEqual(rejected_events[0]["correlation_id"], rejected_events[1]["correlation_id"])
+            result = rejected_events[1]
+            self.assertEqual(result["event_type"], "write_result")
+            self.assertEqual(result["payload"]["status"], "rejected")
+            self.assertEqual(result["payload"]["reason"], "invalid")
+
+    def test_cli_candidate_and_review_write_result_ids_and_status(self):
+        directory, repo = self._initialized()
+        with directory:
+            self.assertEqual(self._cli("--repo", str(repo), "observability", "enable")[0], 0)
+            candidate = self._cli("--repo", str(repo), "candidate", "propose", "--kind", "decision", "--summary", "candidate", "--content-json", "{}", "--id", "cand-observe")[1]
+            candidate_events = observability.export(repo)["events"]
+            self.assertEqual(candidate_events[0]["correlation_id"], candidate_events[1]["correlation_id"])
+            self.assertEqual(candidate_events[1]["candidate_id"], candidate["id"])
+            self.assertEqual(candidate_events[1]["payload"]["status"], "created")
+
+            reviewed = self._cli("--repo", str(repo), "review", "--candidate", candidate["id"], "--confirm")[1]
+            review_events = observability.export(repo)["events"][-2:]
+            self.assertEqual(review_events[0]["correlation_id"], review_events[1]["correlation_id"])
+            self.assertEqual(review_events[1]["record_id"], reviewed["id"])
+            self.assertEqual(review_events[1]["payload"]["status"], "success")
+
+    def test_cli_experience_trace_metrics_and_trace_error_is_inert(self):
+        directory, repo = self._initialized()
+        with directory:
+            self.assertEqual(self._cli("--repo", str(repo), "observability", "enable")[0], 0)
+            rendered = json.dumps({
+                "selected": [{"id": "exp-alpha"}, {"id": "warn-beta"}],
+                "activated_relation_count": 2,
+                "byte_budget": 1536,
+                "byte_count": 987,
+                "omitted_count": 3,
+            }, separators=(",", ":"))
+            command = ("--repo", str(repo), "experience", "match", "--task-type", "bugfix", "--signal", "receipt", "--path", "agentmemory/storage.py", "--max-bytes", "1536")
+            with mock.patch("agentmemory.cli.load_trusted_experiences", return_value=[]), \
+                 mock.patch("agentmemory.cli.render_experience_match", return_value=rendered):
+                self.assertEqual(self._cli_raw(*command), (0, rendered))
+            event = observability.export(repo)["events"][-1]
+            self.assertEqual(event["payload"]["source"], "experience")
+            self.assertEqual(event["payload"]["result_ids"], ["exp-alpha", "warn-beta"])
+            self.assertEqual(event["payload"]["activated_relation_count"], 2)
+            self.assertEqual(event["payload"]["byte_budget"], 1536)
+            self.assertEqual(event["payload"]["byte_count"], 987)
+            self.assertEqual(event["payload"]["omitted_count"], 3)
+
+            observability.delete(repo, confirm=True, all_events=True)
+            with mock.patch("agentmemory.cli.load_trusted_experiences", return_value=[]), \
+                 mock.patch("agentmemory.cli.render_experience_match", return_value=rendered), \
+                 mock.patch("agentmemory.cli._digest", side_effect=RuntimeError("trace derivation failed")):
+                self.assertEqual(self._cli_raw(*command), (0, rendered))
+            self.assertEqual(observability.export(repo)["events"], [])
+
+    def test_cli_openviking_trace_uses_hashed_ids_and_query_digest(self):
+        directory, repo = self._initialized()
+        with directory:
+            self.assertEqual(self._cli("--repo", str(repo), "observability", "enable")[0], 0)
+            query = "retrieve architecture context"
+            uris = ["ov://project/doc-a", "ov://project/doc-b"]
+            response = {"results": [{"uri": uri} for uri in uris]}
+            command = ("--repo", str(repo), "retrieve", "--query", query, "--openviking-cli", "C:/tools/ov.exe", "--openviking-config", "C:/tools/ov.json", "--limit", "2")
+            with mock.patch("agentmemory.cli.retrieve_project_knowledge", return_value=response) as retrieve:
+                self.assertEqual(self._cli_raw(*command), (0, json.dumps(response, separators=(",", ":"), ensure_ascii=False)))
+            retrieve.assert_called_once_with(str(repo), query, "C:/tools/ov.exe", "C:/tools/ov.json", limit=2)
+            event = observability.export(repo)["events"][-1]
+            expected_ids = ["ov-" + hashlib.sha256(uri.encode("utf-8")).hexdigest() for uri in uris]
+            self.assertEqual(event["payload"]["source"], "openviking")
+            self.assertEqual(event["payload"]["query_digest"], hashlib.sha256(query.encode("utf-8")).hexdigest())
+            self.assertEqual(event["payload"]["result_ids"], expected_ids)
+            serialized_events = json.dumps(observability.export(repo)["events"], separators=(",", ":"), ensure_ascii=False)
+            self.assertNotIn(query, serialized_events)
+            for uri in uris:
+                self.assertNotIn(uri, serialized_events)
 
 
 if __name__ == "__main__":

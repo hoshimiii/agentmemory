@@ -50,6 +50,10 @@ def _timestamp_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def new_correlation_id() -> str:
+    return "cor-" + secrets.token_hex(16)
+
+
 def _parse_date(value: Any) -> datetime:
     if not isinstance(value, str) or len(value) != 10:
         _fail("invalid date")

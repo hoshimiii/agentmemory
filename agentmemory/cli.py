@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from typing import Any, Optional, Sequence
 
 from .openviking import OpenVikingError, retrieve_project_knowledge
+from . import observability
 from .schema import RecordValidationError
 from .storage import (
     StorageConflictError,
@@ -145,7 +147,76 @@ def _build_parser() -> argparse.ArgumentParser:
     schedule_command.add_parser("plan")
     run_schedule_parser = schedule_command.add_parser("run")
     run_schedule_parser.add_argument("--dry-run", action="store_true")
+
+    observe = command.add_parser("observability")
+    observe_command = observe.add_subparsers(dest="observability_command", required=True)
+    observe_command.add_parser("enable")
+    observe_command.add_parser("disable")
+    observe_command.add_parser("status")
+    export = observe_command.add_parser("export")
+    export.add_argument("--since")
+    export.add_argument("--until")
+    report = observe_command.add_parser("report")
+    report.add_argument("--date", required=True)
+    delete = observe_command.add_parser("delete")
+    targets = delete.add_mutually_exclusive_group(required=True)
+    targets.add_argument("--all", action="store_true", dest="all_events")
+    targets.add_argument("--before")
+    delete.add_argument("--confirm", action="store_true", required=True)
+    outcome = observe_command.add_parser("outcome")
+    outcome_command = outcome.add_subparsers(dest="outcome_command", required=True)
+    annotate = outcome_command.add_parser("annotate")
+    annotate.add_argument("--correlation-id", required=True)
+    for name in ("used-by-agent", "affected-decision", "task-success"):
+        annotate.add_argument("--" + name, choices=["true", "false", "unknown"], required=True)
+    for name in ("user-corrections", "retries", "turns", "tool-calls", "token-cost"):
+        annotate.add_argument("--" + name, type=int)
+    annotate.add_argument("--confirm", action="store_true", required=True)
     return parser
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _nullable_bool(value: str) -> Any:
+    return {"true": True, "false": False, "unknown": None}[value]
+
+
+def _trace_write(repo: Optional[str], *, operation: str, trigger: str, source: str, kind: Optional[str], scope: str, identity_field: Optional[str], action: Any) -> Any:
+    correlation = observability.new_correlation_id()
+    base = {"operation": operation, "trigger": trigger, "source": source, "kind": kind, "scope": scope}
+    observability.emit(repo, event_type="write_attempt", correlation_id=correlation, payload=base)
+    try:
+        result = action()
+    except StorageConflictError:
+        observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "conflict"})
+        raise
+    except (StorageError, RecordValidationError, ValueError):
+        observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "storage_failure"})
+        raise
+    status = "success" if operation == "review" else ("created" if result.get("created", True) else "idempotent")
+    identifiers = {identity_field: result["id"]} if identity_field and isinstance(result.get("id"), str) else {}
+    observability.emit(repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": status, "reason": None}, **identifiers)
+    return result
+
+
+def _trace_experience(repo: Optional[str], payload: str, args: Any) -> None:
+    try:
+        rendered = json.loads(payload)
+        selected = rendered.get("selected", [])
+        selector = json.dumps({"error_patterns": args.error_pattern, "paths": args.path, "signals": args.signal, "task_types": args.task_type}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        observability.emit(repo, event_type="retrieval", payload={"source": "experience", "query_digest": _digest(selector), "result_ids": [item["id"] for item in selected], "ranks": list(range(len(selected))), "scores": [None] * len(selected), "lifecycle": "active", "filter": "experience", "activated_relation_count": rendered.get("activated_relation_count"), "byte_budget": rendered.get("byte_budget"), "byte_count": rendered.get("byte_count"), "omitted_count": rendered.get("omitted_count")})
+    except Exception:
+        pass
+
+
+def _trace_openviking(repo: Optional[str], query: str, payload: Any) -> None:
+    try:
+        results = payload.get("results", [])
+        observability.emit(repo, event_type="retrieval", payload={"source": "openviking", "query_digest": _digest(query), "result_ids": ["ov-" + _digest(item["uri"]) for item in results], "ranks": list(range(len(results))), "scores": [None] * len(results), "lifecycle": None, "filter": "project", "activated_relation_count": None, "byte_budget": None, "byte_count": None, "omitted_count": None})
+    except Exception:
+        pass
 
 
 def run(argv: Optional[Sequence[str]] = None) -> int:
@@ -166,6 +237,32 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             _print_json(payload)
             return 0
 
+        if args.command == "observability":
+            if args.observability_command == "enable":
+                payload = observability.configure(args.repo, enabled=True)
+            elif args.observability_command == "disable":
+                payload = observability.configure(args.repo, enabled=False)
+            elif args.observability_command == "status":
+                config = observability.load_config(args.repo)
+                payload = {"configured": config is not None, "enabled": bool(config and config["enabled"])}
+            elif args.observability_command == "export":
+                payload = observability.export(args.repo, since=args.since, until=args.until)
+            elif args.observability_command == "report":
+                payload = observability.report(args.repo, day=args.date)
+            elif args.observability_command == "delete":
+                payload = {"deleted": observability.delete(args.repo, confirm=args.confirm, all_events=args.all_events, before=args.before)}
+            elif args.observability_command == "outcome" and args.outcome_command == "annotate":
+                metrics = {name: getattr(args, name) for name in ("user_corrections", "retries", "turns", "tool_calls", "token_cost")}
+                if any(value is not None and value < 0 for value in metrics.values()):
+                    raise ValueError("invalid outcome metrics")
+                payload = {"annotated": observability.annotate_outcome(args.repo, correlation_id=args.correlation_id, confirm=args.confirm,
+                    used_by_agent=_nullable_bool(args.used_by_agent), affected_decision=_nullable_bool(args.affected_decision), task_success=_nullable_bool(args.task_success), **metrics)}
+            else:
+                _emit_error("error: invalid arguments")
+                return 2
+            _print_json(payload)
+            return 0
+
         if args.command == "checkpoint":
             if args.checkpoint_command != "create":
                 _emit_error("error: unsupported checkpoint command")
@@ -177,13 +274,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 _emit_error("error: invalid content-json")
                 return 2
 
-            payload = create_checkpoint(
-                args.repo,
-                summary=args.summary,
-                content=content,
-                paths=args.path,
-                record_id=args.id,
-            )
+            payload = _trace_write(args.repo, operation="checkpoint", trigger="cli", source="cli", kind="checkpoint", scope="local", identity_field="record_id", action=lambda: create_checkpoint(args.repo, summary=args.summary, content=content, paths=args.path, record_id=args.id))
             payload["created"] = bool(payload.get("created", True))
             _print_json(payload)
             return 0
@@ -209,16 +300,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                     return 2
                 else:
                     experience = None
-                payload = create_candidate(
-                    args.repo,
-                    kind=args.kind,
-                    summary=args.summary,
-                    content=content,
-                    paths=args.path,
-                    semantic_role=args.semantic_role,
-                    record_id=args.id,
-                    experience=experience,
-                )
+                payload = _trace_write(args.repo, operation="candidate", trigger="cli", source="cli", kind=args.kind, scope="local", identity_field="candidate_id", action=lambda: create_candidate(args.repo, kind=args.kind, summary=args.summary, content=content, paths=args.path, semantic_role=args.semantic_role, record_id=args.id, experience=experience))
                 payload["created"] = bool(payload.get("created", True))
                 _print_json(payload)
                 return 0
@@ -227,7 +309,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             return 2
 
         if args.command == "review":
-            payload = review_candidate(args.repo, candidate_id=args.candidate_id)
+            payload = _trace_write(args.repo, operation="review", trigger="cli", source="explicit-review", kind=None, scope="project", identity_field="record_id", action=lambda: review_candidate(args.repo, candidate_id=args.candidate_id))
             _print_json(payload)
             return 0
 
@@ -246,6 +328,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             )
             if payload is None:
                 raise StorageError("experience rendering failed")
+            _trace_experience(args.repo, payload, args)
             sys.stdout.write(payload)
             return 0
 
@@ -257,6 +340,7 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
                 args.openviking_config,
                 limit=args.limit,
             )
+            _trace_openviking(args.repo, args.query, payload)
             _print_json(payload)
             return 0
 
@@ -275,7 +359,20 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
             elif args.schedule_command == "plan":
                 payload = schedule_plan(args.repo)
             elif args.schedule_command == "run":
-                payload = run_schedule(args.repo, dry_run=args.dry_run)
+                if args.dry_run:
+                    payload = run_schedule(args.repo, dry_run=True)
+                else:
+                    correlation = observability.new_correlation_id()
+                    base = {"operation": "candidate", "trigger": "schedule", "source": "scheduled-ai", "kind": None, "scope": "local"}
+                    observability.emit(args.repo, event_type="write_attempt", correlation_id=correlation, payload=base)
+                    try:
+                        payload = run_schedule(args.repo, dry_run=False)
+                    except Exception:
+                        observability.emit(args.repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "failure", "reason": "storage_failure"})
+                        raise
+                    rejected = payload.get("rejected_count", 0)
+                    succeeded = bool(payload.get("candidates"))
+                    observability.emit(args.repo, event_type="write_result", correlation_id=correlation, payload={**base, "status": "rejected" if rejected and not succeeded else "success", "reason": "invalid" if rejected and not succeeded else None})
             else:
                 _emit_error("error: invalid arguments")
                 return 2
