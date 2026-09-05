@@ -60,11 +60,25 @@ This turn's only goal: implement and verify the smallest project-scoped M10 obse
 
 ## Pending List
 
-- Current Work: implement M10 on `codex/m10-memory-observability`, then run focused/full verification and a fresh independent Terra xhigh review.
+- Current Work: M10 is implemented and accepted on `codex/m10-memory-observability`; merge, installation, push, release, scheduler creation, and experiment-runner automation remain separate decisions.
 - M9 is merged locally into `main`, installed as personal plugin version `0.1.1+codex.20260905034459`, and passed a real Codex provider smoke in `C:\am9-smoke-0905`: exit 0, three local unreviewed candidates, one bounded rejection, zero tracked-file changes, scheduler disabled afterward.
 - M9 live diagnostics also exposed the Windows long-path ceiling in the first disposable temp repository; the successful acceptance repo used a shorter path. Long-path support is intentionally deferred because it is not an M10 dependency.
 - OpenViking was healthy earlier but returned no relevant project memory; live repository evidence remains authoritative.
-- Exact Next Action: implement the settled minimal event/config/report core, then integrate only the existing objective transition points serially.
+- Exact Next Action: after explicit approval, merge M10 into local `main` and install the resulting personal plugin; otherwise keep the accepted branch as the rollback point.
+
+## M10 Acceptance Evidence
+
+- Branch: `codex/m10-memory-observability`, based on local `main` commit `97ac3ce`; accepted implementation commits end at `a024adf`.
+- The opt-in, worktree-local observability loop records privacy-minimized write, retrieval, confirmed SessionStart injection, and explicitly confirmed outcome events. Automatic tracing fails open; export, report, outcome annotation, and deletion fail closed.
+- Dynamic context remains selector-driven: explicit `experience match` starts at 8192 bytes, adds 2048 bytes per activated relation, and caps at 24576 bytes. SessionStart remains fixed at 6000 bytes because it has no objective relation-activation signal.
+- `py -3 -m unittest tests.test_observability -q`: 19 passed in 69.629 seconds.
+- `py -3 -m unittest tests.test_scheduler tests.test_hook_runtime -q`: 35 passed in 100.223 seconds.
+- `py -3 -m unittest discover -s tests -q`: 151 passed with 2 expected Windows `mkfifo` capability skips in 334.276 seconds.
+- `python -m unittest discover -s tests -q`: 151 passed with 2 expected Windows `mkfifo` capability skips in 354.710 seconds.
+- Python 3.9 AST parsing passed for 15 files; JSON parsing passed for 7 files; compileall, Skill validation, Plugin validation, and `git diff --check` passed. `AICR-pass` is not installed and was not applicable.
+- Fresh independent `gpt-5.6-terra xhigh` review initially found trace-identity, path-race, exact-bound, and orphan-outcome gaps. Commit `a024adf` fixed them; re-review reported no remaining P0-P2 findings.
+- Residual security limit: portable Windows APIs cannot formally eliminate the final same-privilege reparse race between validation and replacement. The implementation follows the repository's existing path-validation model, uses a stable lock outside the trace directory, revalidates around lock/write/replace, and has symlink-swap regression coverage.
+- M10 was not merged, installed, pushed, released, or connected to an external scheduler. The installed personal plugin remains the accepted M9 build.
 
 ## M9 Acceptance Evidence
 
