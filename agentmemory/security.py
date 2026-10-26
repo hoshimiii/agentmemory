@@ -16,9 +16,14 @@ class SecretScanError(ValueError):
 _RE_KEY = re.compile(r"^(authorization|auth|api[_-]?key|access[_-]?key|secret|secret[_-]?key|password|passwd|token|cookie|session|client[_-]?secret)$", re.IGNORECASE)
 _RE_PRIVATE_KEY = re.compile(r"-----BEGIN (?:RSA |DSA |EC |OPENSSH )?PRIVATE KEY-----", re.IGNORECASE)
 _RE_BEARER = re.compile(r"\bBearer\s+[A-Za-z0-9\-_\.~\+/=]{20,}\b")
-_RE_OPENAI = re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")
+_RE_OPENAI = re.compile(
+    r"(?<![A-Za-z0-9_])sk-(?:[A-Za-z0-9]{20,}|(?:proj|svcacct)-[A-Za-z0-9_-]{20,}|ant-(?:api|oat)\d{2}-[A-Za-z0-9_-]{20,})(?![A-Za-z0-9_])"
+)
 _RE_AWS = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
-_RE_GITHUB = re.compile(r"\bgh[opurs][A-Za-z0-9]{36,}\b", re.IGNORECASE)
+_RE_GITHUB = re.compile(
+    r"(?<![A-Za-z0-9_])(?:gh[opurs]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
 _RE_DB_CONN = re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp|rabbitmq|mssql)://[^/\s@]+:[^/\s@]+@", re.IGNORECASE)
 
 
