@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from agentmemory import identity, schema
-from agentmemory.security import SecretScanError
+from agentmemory.security import SecretScanError, scan_for_secrets
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -614,6 +614,34 @@ class TestAgentMemoryCoreContract(unittest.TestCase):
             record["content"] = {"api_key": secret}
             with self.assertRaises(SecretScanError):
                 schema.validate_record(record)
+
+    def test_secret_scan_recognizes_common_github_and_model_key_shapes(self) -> None:
+        secrets = [
+            "ghp_" + "A1" * 18,
+            "GHO_" + "b2" * 18,
+            "github_pat_" + "xY_" * 10,
+            "sk-" + "a1" * 10,
+            "sk-proj-" + "Ab9_" * 8,
+            "sk-svcacct-" + "K3z_" * 8,
+            "sk-ant-api03-" + "q7" * 12,
+            "sk-ant-oat01-" + "r8" * 12,
+        ]
+        for secret in secrets:
+            with self.subTest(shape=secret.split("-", 2)[0]):
+                with self.assertRaises(SecretScanError):
+                    scan_for_secrets({"content": [{"body": f"summary: ({secret}), end"}]})
+
+        ordinary_text = [
+            "The github_pat guide documents labels, branches, and pull requests.",
+            "Choose model sk-proj for the project summary and model sk-ant-api03 for examples.",
+            "The project identifier is sk-proj-short and the task id is ghp_example.",
+        ]
+        for text in ordinary_text:
+            with self.subTest(text=text):
+                scan_for_secrets({"content": {"body": text}})
+
+        with self.assertRaises(SecretScanError):
+            scan_for_secrets({"metadata": {"api_key": "present"}})
 
     def test_schema_file_is_valid_and_structural(self) -> None:
         loaded = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
